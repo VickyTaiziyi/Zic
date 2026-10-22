@@ -4,8 +4,6 @@
 
 给 ZCode 桌面端用的安卓远程客户端，非官方。
 
-[vicyi.com](https://vicyi.com/)
-
 <a href="./README.md"><img alt="English" src="https://img.shields.io/badge/English-5F6368?style=for-the-badge"></a>
 <a href="./README.zh-CN.md"><img alt="中文" src="https://img.shields.io/badge/%E4%B8%AD%E6%96%87-2F6FED?style=for-the-badge"></a>
 
