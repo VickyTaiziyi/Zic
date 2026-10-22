@@ -51,11 +51,28 @@ android {
         }
     }
 
+    // The published app is signed with the debug keystore. CI sets
+    // ZIC_KEYSTORE to that same file so an update installs over it.
+    // A keystore generated on the runner would not.
+    val ciKeystore = System.getenv("ZIC_KEYSTORE")
+    if (!ciKeystore.isNullOrBlank()) {
+        signingConfigs {
+            create("ciRelease") {
+                storeFile = file(ciKeystore)
+                storePassword = System.getenv("ZIC_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ZIC_KEY_ALIAS")
+                keyPassword = System.getenv("ZIC_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (!ciKeystore.isNullOrBlank()) {
+                signingConfigs.getByName("ciRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

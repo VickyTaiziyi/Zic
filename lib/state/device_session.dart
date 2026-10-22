@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../protocol/automation.dart';
 import '../auth/relay_token.dart';
+import '../protocol/channel_client.dart';
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
 import '../protocol/off_peak.dart';
@@ -13,6 +14,7 @@ import '../protocol/relay_client.dart';
 import '../protocol/remote_client.dart';
 import '../protocol/task_commands.dart';
 import 'device_store.dart';
+import 'project_tree.dart';
 
 /// Mirrors `HC()` in the web client:
 /// key = workspaceIdentity?.trim() || workspacePath.
@@ -455,11 +457,18 @@ class DeviceSession extends ChangeNotifier
   List<Map<String, dynamic>> _workspaces = [];
   Map<String, dynamic>? _activeWorkspace;
 
-  /// Relay-level task list (`Dg` model from bootstrap /
-  /// workspace-list-updated): every workspace's tasks with
-  /// displayStatus/pinned/archived/unreadAt. The web mobile home renders
-  /// non-active workspaces (and the archive view) from exactly this list.
+  /// Task rows for every project (`project.readTree`, or `listTaskList`
+  /// across the open tabs when that call is missing). Bootstrap no longer
+  /// carries tasks; this list is what the home screen groups by project.
   List<Map<String, dynamic>> _relayTasks = [];
+
+  /// Projects from `project.readTree`. Empty until the first successful read.
+  List<CatalogProject> _projects = [];
+
+  Timer? _catalogTimer;
+  void Function()? _cancelProjectWatch;
+  int _catalogGen = 0;
+  String? _catalogError;
 
   /// Well-known `app-error` reason of the last fatal failure (mirrors the
   /// web's `webRemoteControl.failure.*` enum); UI maps it to localized copy.
@@ -482,8 +491,10 @@ class DeviceSession extends ChangeNotifier
   /// True while a workspace bridge + sessions-index open is in flight.
   bool get openingWorkspace => _openingWorkspace;
 
-  /// Workspaces reported by bootstrap (raw maps).
-  List<Map<String, dynamic>> get workspaces => _workspaces;
+  /// Window tabs, with each ZCode project named and any project that is not
+  /// already an open tab appended. Raw tabs stay in [_workspaces].
+  List<Map<String, dynamic>> get workspaces =>
+      mergeWorkspaceCatalog(tabs: _workspaces, projects: _projects);
   Map<String, dynamic>? get activeWorkspace => _activeWorkspace;
 
   /// Live sessions-index state of the active workspace, if subscribed.
@@ -639,12 +650,7 @@ class DeviceSession extends ChangeNotifier
           for (final w in list)
             if (w is Map) w.cast<String, dynamic>(),
       ];
-      final tasks = bootstrap['tasks'];
-      _relayTasks = [
-        if (tasks is List)
-          for (final t in tasks)
-            if (t is Map) t.cast<String, dynamic>(),
-      ];
+      _applyBootstrapTasks(bootstrap['tasks']);
       _retryAttempts = 0;
       // Auto-open a workspace so the native list works immediately: the
       // last-used one when known, else the first. (The web mobile flow
@@ -723,14 +729,19 @@ class DeviceSession extends ChangeNotifier
           if (w is Map) w.cast<String, dynamic>(),
       ];
     }
-    final tasks = result['tasks'];
-    if (tasks is List) {
-      _relayTasks = [
-        for (final t in tasks)
-          if (t is Map) t.cast<String, dynamic>(),
-      ];
-    }
+    _applyBootstrapTasks(result['tasks']);
     notifyListeners();
+    if (_bridge != null) unawaited(_refreshCatalog());
+  }
+
+  /// Older desktops put tasks on the overview. Current ones omit the field;
+  /// an absent list must not wipe the project catalog already loaded.
+  void _applyBootstrapTasks(dynamic tasks) {
+    if (tasks is! List) return;
+    _relayTasks = [
+      for (final t in tasks)
+        if (t is Map) t.cast<String, dynamic>(),
+    ];
   }
 
   /// `app-error` reason → session failure state. session-conflict means the
@@ -887,6 +898,8 @@ class DeviceSession extends ChangeNotifier
       _chatSubRefs.clear();
       _bridge = bridge;
       _activeWorkspace = workspace;
+      // Rebind while the previous bridge can still accept the dispose.
+      _bindProjectWatch(bridge);
       unawaited(oldSub?.dispose());
       for (final s in oldChats) {
         unawaited(s.dispose());
@@ -935,7 +948,150 @@ class DeviceSession extends ChangeNotifier
       // Connected-but-never-ready (open failed OR subscribed with no
       // snapshot yet) is exactly the cold-start loading bug: guard it.
       _armListWatchdog();
+      if (_bridge != null && !_disposed) unawaited(_refreshCatalog());
     }
+  }
+
+  /// Subscribes to project changes and keeps a short poll behind it. Adding
+  /// a project does not change the window-tab list the relay pushes, so the
+  /// phone has to ask again.
+  void _bindProjectWatch(BridgeSession bridge) {
+    _cancelProjectWatch?.call();
+    _cancelProjectWatch = bridge.channels.addEventListener(
+      Channels.windowProjectChanges,
+      'onDidChange',
+      (_) {
+        unawaited(_refreshCatalog());
+      },
+    );
+    _catalogTimer?.cancel();
+    _catalogTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      unawaited(_refreshCatalog());
+    });
+  }
+
+  bool _catalogCurrent(int gen, BridgeSession bridge) =>
+      !_disposed && gen == _catalogGen && identical(_bridge, bridge);
+
+  /// Loads every project and its tasks. `project.readTree` is the desktop
+  /// sidebar's source. When that channel is absent, `listTaskList` still
+  /// fills tasks for the tabs the relay already reported.
+  Future<void> _refreshCatalog() async {
+    final bridge = _bridge;
+    if (bridge == null || _disposed) return;
+    final gen = ++_catalogGen;
+    try {
+      final res = await _bridgeCall(Channels.project, 'readTree', const [
+        <String, dynamic>{},
+      ]);
+      if (!_catalogCurrent(gen, bridge)) return;
+      final parsed = parseProjectTree(res);
+      if (parsed != null) {
+        _catalogError = null;
+        _applyCatalog(parsed.projects, parsed.tasks);
+        return;
+      }
+    } catch (e) {
+      _noteCatalogError(e);
+    }
+    if (!_catalogCurrent(gen, bridge)) return;
+    await _refreshTasksFromIndex(gen, bridge);
+  }
+
+  Future<void> _refreshTasksFromIndex(int gen, BridgeSession bridge) async {
+    final scopes = <Map<String, dynamic>>[];
+    final seen = <String>{};
+    for (final w in _workspaces) {
+      final path = w['workspacePath'];
+      if (path is! String || path.isEmpty) continue;
+      if (!seen.add(normalizeWorkspacePath(path))) continue;
+      final identity = w['workspaceIdentity'];
+      scopes.add({
+        'workspacePath': path,
+        if (identity is String && identity.isNotEmpty)
+          'workspaceIdentity': identity,
+      });
+    }
+    if (scopes.isEmpty || !_catalogCurrent(gen, bridge)) return;
+    try {
+      final results = await Future.wait([
+        _bridgeCall(Channels.zcodeTask, 'listTaskList', [
+          {'workspaceScopes': scopes, 'sortBy': 'updated'},
+        ]),
+        _bridgeCall(Channels.zcodeTask, 'listTaskList', [
+          {'kind': 'pinned', 'workspaceScopes': scopes, 'sortBy': 'updated'},
+        ]),
+        _bridgeCall(Channels.zcodeTask, 'listTaskList', [
+          {'kind': 'archived', 'workspaceScopes': scopes, 'sortBy': 'updated'},
+        ]),
+      ]);
+      if (!_catalogCurrent(gen, bridge)) return;
+      final byId = <String, Map<String, dynamic>>{};
+      void take(dynamic res, {required bool pinned, required bool archived}) {
+        for (final task in tasksFromListResult(
+          res,
+          pinned: pinned,
+          archived: archived,
+        )) {
+          byId['${task['taskId']}'] = task;
+        }
+      }
+
+      take(results[0], pinned: false, archived: false);
+      take(results[1], pinned: true, archived: false);
+      take(results[2], pinned: false, archived: true);
+      _catalogError = null;
+      _applyCatalog(_projects, byId.values.toList());
+    } catch (e) {
+      _noteCatalogError(e);
+    }
+  }
+
+  void _applyCatalog(
+    List<CatalogProject> projects,
+    List<Map<String, dynamic>> tasks,
+  ) {
+    final previous = _catalogSignature();
+    _projects = projects;
+    _relayTasks = tasks;
+    if (_catalogSignature() == previous) return;
+    notifyListeners();
+  }
+
+  String _catalogSignature() => jsonEncode([
+    for (final p in _projects) [p.id, p.name, p.position, p.roots],
+    for (final t in _relayTasks)
+      [
+        t['taskId'],
+        t['title'],
+        t['updatedAt'],
+        t['archived'],
+        t['pinned'],
+        t['displayStatus'],
+        t['projectId'],
+        t['workspacePath'],
+      ],
+  ]);
+
+  void _noteCatalogError(Object e) {
+    final msg = '$e';
+    if (_catalogError == msg) return;
+    _catalogError = msg;
+    _log('[session] project catalog failed: $msg');
+  }
+
+  /// Channel RPC that must not tear the link down. [callChannel] treats a
+  /// timeout as a stalled bridge and rebuilds; a catalog poll cannot do that.
+  Future<dynamic> _bridgeCall(
+    String channel,
+    String method,
+    List<Object?> args,
+  ) {
+    final bridge = _bridge;
+    if (bridge == null) return Future.value(null);
+    return bridge.channels
+        .call(channel, method, args, timeout: const Duration(seconds: 6))
+        .timeout(const Duration(seconds: 8));
   }
 
   void _onSessionsChanged() {
@@ -1049,12 +1205,7 @@ class DeviceSession extends ChangeNotifier
           for (final w in list)
             if (w is Map) w.cast<String, dynamic>(),
       ];
-      final tasks = bootstrap['tasks'];
-      _relayTasks = [
-        if (tasks is List)
-          for (final t in tasks)
-            if (t is Map) t.cast<String, dynamic>(),
-      ];
+      _applyBootstrapTasks(bootstrap['tasks']);
     } catch (e) {
       _log('[session] reload bootstrap failed: $e');
       _softReloadFails += 1;
@@ -1737,6 +1888,13 @@ class DeviceSession extends ChangeNotifier
     if (_disposed) return;
     _retryTimer?.cancel();
     _listWatchdog?.cancel();
+    _catalogTimer?.cancel();
+    _catalogTimer = null;
+    _cancelProjectWatch?.call();
+    _cancelProjectWatch = null;
+    _catalogGen += 1;
+    _projects = [];
+    _catalogError = null;
     _listEscalations = 0;
     _softReloadFails = 0;
     _connecting = false;
@@ -1753,6 +1911,7 @@ class DeviceSession extends ChangeNotifier
     _activeWorkspace = null;
     _workspaces = [];
     _relayTasks = [];
+    _projects = [];
     _failureReason = null;
     _kicked = false;
     _error = null;

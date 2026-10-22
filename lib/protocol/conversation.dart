@@ -1352,6 +1352,8 @@ class SessionEntry {
       'unreadAt': task['unreadAt'],
       'workspacePath': task['workspacePath'],
       'workspaceIdentity': task['workspaceIdentity'],
+      'projectId': task['projectId'],
+      'archived': task['archived'],
     });
   }
 }

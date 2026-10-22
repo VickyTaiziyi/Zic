@@ -140,6 +140,8 @@ class Channels {
   static const credential = 'credential';
   static const broadcast = 'broadcast';
   static const zcodeTask = 'zcode-task';
+  static const project = 'project';
+  static const windowProjectChanges = 'window-project-changes';
   static const zcodeAgent = 'zcode-agent';
   static const zcodeSession = 'zcode-session';
   static const fileWatcher = 'file-watcher';

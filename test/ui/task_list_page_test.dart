@@ -641,4 +641,142 @@ void main() {
         .toList();
     expect(order, ['任务乙', '任务甲']);
   });
+
+  testWidgets('other projects show their catalog tasks and live rows win',
+      (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 'live1',
+          'title': '现场任务',
+          'phase': 'running',
+          'lastActivityAt': now,
+        },
+      ],
+      workspaces: [
+        {
+          'workspacePath': r'D:\Code\projects\Zic',
+          'workspaceIdentity': 'zic-id',
+          'label': 'Zic',
+          'projectId': 'p-zic',
+          'rootPaths': [r'D:\Code\projects\Zic'],
+        },
+        {
+          'workspacePath': r'D:\AI\ZCodeData\.zcode\workspace\draft-8dd',
+          'label': 'operations',
+          'projectId': 'p-ops',
+          'rootPaths': [r'D:/AI/ZCodeData/.zcode/workspace/draft-8dd'],
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 'live1',
+          'title': '旧标题',
+          'projectId': 'p-zic',
+          'workspacePath': r'd:/code/projects/zic',
+          'displayStatus': 'idle',
+          'updatedAt': now - 1000,
+        },
+        {
+          'taskId': 'cat1',
+          'title': '目录任务',
+          'projectId': 'p-zic',
+          'workspacePath': r'D:\Code\projects\Zic',
+          'displayStatus': 'idle',
+          'updatedAt': now - 2000,
+        },
+        {
+          'taskId': 'ops1',
+          'title': '巡检通知',
+          'projectId': 'p-ops',
+          'workspacePath': r'D:\AI\ZCodeData\.zcode\workspace\draft-8dd',
+          'displayStatus': 'completed',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('现场任务'), findsOneWidget);
+    expect(find.text('目录任务'), findsOneWidget);
+    expect(find.text('旧标题'), findsNothing);
+    expect(find.text('operations'), findsOneWidget);
+    expect(find.text('巡检通知'), findsNothing);
+    expect(find.textContaining('2 个工作区 · 3 个任务'), findsOneWidget);
+
+    await tester.tap(find.text('operations'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('巡检通知'), findsOneWidget);
+    expect(session.activeWorkspace?['workspaceIdentity'], 'zic-id');
+  });
+
+  testWidgets('a task on another project root opens that folder',
+      (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 'live1',
+          'title': '现场任务',
+          'phase': 'idle',
+          'lastActivityAt': now,
+        },
+      ],
+      workspaces: [
+        {
+          'workspacePath': r'D:\Code\projects\Zic',
+          'workspaceIdentity': 'zic-id',
+          'label': 'Zic',
+          'projectId': 'p-zic',
+          'rootPaths': [
+            r'D:\Code\projects\Zic',
+            r'D:\Code\projects\Zic-extra',
+          ],
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 'extra',
+          'title': '另一个根',
+          'projectId': 'p-zic',
+          'workspacePath': r'D:\Code\projects\Zic-extra',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => true),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('另一个根'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(session.activeWorkspace?['workspacePath'], r'D:\Code\projects\Zic-extra');
+    expect(session.activeWorkspace?['workspaceIdentity'], isNull);
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
 }

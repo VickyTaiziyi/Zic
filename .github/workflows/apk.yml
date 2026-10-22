@@ -1,16 +1,24 @@
 name: apk
 
-# Manual, private-test APK builds: run from the Actions tab, then download
-# the artifact from the same page (only collaborators of this — private —
-# repository can see or fetch it).
+# A manual run uploads artifacts for 14 days.
+# A v* tag builds the arm64 release and publishes it. Installed copies
+# prompt on the next update check and open that asset in the browser.
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: subosito/flutter-action@v2
         with:
@@ -26,12 +34,53 @@ jobs:
       - name: Test
         run: flutter test
 
-      - name: Build release APKs
+      - name: Release keystore
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          flutter build apk --release --dart-define=APP_CHANNEL=github
-          flutter build apk --release --split-per-abi --dart-define=APP_CHANNEL=github
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64}" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set. A runner debug key would not install over the published app."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > "$RUNNER_TEMP/zic-release.keystore"
+          echo "ZIC_KEYSTORE=$RUNNER_TEMP/zic-release.keystore" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        env:
+          ZIC_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ZIC_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ZIC_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if [ -z "${ZIC_KEYSTORE_PASSWORD}" ] || [ -z "${ZIC_KEY_ALIAS}" ] || [ -z "${ZIC_KEY_PASSWORD}" ]; then
+              echo "::error::release signing secrets are incomplete"
+              exit 1
+            fi
+            flutter build apk --release --target-platform android-arm64 --dart-define=APP_CHANNEL=github
+          else
+            flutter build apk --release --dart-define=APP_CHANNEL=github
+            flutter build apk --release --split-per-abi --dart-define=APP_CHANNEL=github
+          fi
+
+      - name: Check release certificate
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          bt=$(ls -d "$sdk"/build-tools/* | sort -V | tail -1)
+          digest=$("$bt/apksigner" verify --print-certs build/app/outputs/flutter-apk/app-release.apk | sed -n 's/.*SHA-256 digest: //p' | head -1)
+          expected=5adf330d777e085df7fb0e374dd22b81fc9df3c4df0fd89584ad3d10da3719df
+          echo "certificate SHA-256: $digest"
+          if [ "$digest" != "$expected" ]; then
+            echo "::error::APK certificate does not match the published app"
+            exit 1
+          fi
 
       - name: Upload artifacts
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: zic-apks
@@ -41,3 +90,20 @@ jobs:
             build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
             build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
             build/app/outputs/flutter-apk/app-x86_64-release.apk
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="zic-${VERSION}-arm64.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "$ASSET"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > release-notes.txt
+          if [ ! -s release-notes.txt ]; then
+            printf 'Zic %s\n' "$VERSION" > release-notes.txt
+          fi
+          gh release create "$GITHUB_REF_NAME" "$ASSET" \
+            --title "$VERSION" \
+            --notes-file release-notes.txt

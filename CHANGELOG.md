@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.16+17 — 2026-10-22
+
+- The task home loads every ZCode project, not only the open workspace.
+  Names match the desktop sidebar. A project added on the desktop shows
+  up on the phone.
+- Indexed tasks stay visible while the live session index is still
+  loading. Opening a task whose folder differs from the card opens that
+  folder.
+
 ## 1.0.15+16 — 2026-10-22
 
 - Update checks are pinned to `VickyTaiziyi/Zic`. A newer release prompts

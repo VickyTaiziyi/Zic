@@ -9,6 +9,7 @@ import '../protocol/conversation.dart';
 import '../state/app_kv.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
+import '../state/project_tree.dart';
 import 'automations_page.dart';
 import 'chat/chat_page.dart';
 import 'desktop_settings_page.dart';
@@ -126,9 +127,27 @@ class _TaskListPageState extends State<TaskListPage> {
   DeviceSession? get _session =>
       widget.sessionOverride ?? widget.hub.sessionOf(widget.device.id);
 
-  bool _isWorkspaceActive(DeviceSession session, Map<String, dynamic> ws) =>
-      identical(session.activeWorkspace, ws) ||
-      workspaceKeyOf(ws) == workspaceKeyOf(session.activeWorkspace ?? const {});
+  bool _isWorkspaceActive(DeviceSession session, Map<String, dynamic> ws) {
+    final active = session.activeWorkspace;
+    if (active == null) return false;
+    if (identical(active, ws)) return true;
+    if (workspaceKeyOf(ws) == workspaceKeyOf(active)) return true;
+    // A project card stays current when the open folder is any of its roots.
+    final activePath = active['workspacePath'];
+    if (activePath is! String || activePath.isEmpty) return false;
+    final roots = ws['rootPaths'];
+    if (roots is List) {
+      for (final root in roots) {
+        if (root is String && root.isNotEmpty && pathsEqual(root, activePath)) {
+          return true;
+        }
+      }
+    }
+    final cardPath = ws['workspacePath'];
+    return cardPath is String &&
+        cardPath.isNotEmpty &&
+        pathsEqual(cardPath, activePath);
+  }
 
   /// Shared expand state for the mobile card and the desktop sidebar folder:
   /// manual override wins, otherwise the active workspace is expanded.
@@ -175,50 +194,54 @@ class _TaskListPageState extends State<TaskListPage> {
 
   // ------------------------------------------------- merged task data source
   //
-  // The relay overview (bootstrap / workspace-list-updated) carries every
-  // workspace's tasks (`Dg`: displayStatus/pinned/archived/unreadAt) — the
-  // web mobile home renders non-active workspaces and the archive view from
-  // it. The active workspace additionally has the live sessions-index with
-  // richer phase + pendingInteraction, which wins per task id.
+  // The desktop project catalog lists every project and its indexed tasks.
+  // The relay overview no longer carries tasks, and the live sessions-index
+  // only covers the one workspace the phone has open. A card takes catalog
+  // rows matched by project, root path, or key. The live index wins per id
+  // once it is ready, including an archived flag that hides the catalog copy.
 
-  /// Workspace key of a relay task (`Dg.workspaceIdentity ?? workspacePath`,
-  /// same rule as [workspaceKeyOf]).
-  String? _relayTaskKey(Map<String, dynamic> task) {
-    final identity = task['workspaceIdentity'];
-    if (identity is String && identity.trim().isNotEmpty) {
-      return identity.trim();
-    }
-    final path = task['workspacePath'];
-    if (path is String && path.isNotEmpty) return path;
-    return null;
-  }
-
-  Map<String, dynamic>? _workspaceForKey(DeviceSession session, String? key) {
-    if (key == null) return null;
-    for (final ws in session.workspaces) {
-      if (workspaceKeyOf(ws) == key) return ws;
-    }
-    return null;
-  }
-
-  /// Relay tasks of one workspace as row entries (non-archived unless
-  /// [archivedOnly]).
-  List<SessionEntry> _relayEntriesFor(
+  /// Card a catalog or live row belongs to. A project card wins over a plain
+  /// folder when both would match.
+  Map<String, dynamic>? _workspaceForTask(
     DeviceSession session,
-    Map<String, dynamic> ws, {
-    bool archivedOnly = false,
-  }) {
-    final key = workspaceKeyOf(ws);
-    if (key == null) return const [];
-    return [
-      for (final t in session.relayTasks)
-        if (_relayTaskKey(t) == key && (t['archived'] == true) == archivedOnly)
-          SessionEntry.fromRelayTask(t),
-    ];
+    Map<String, dynamic> task,
+  ) {
+    Map<String, dynamic>? fallback;
+    for (final ws in session.workspaces) {
+      if (!relayTaskOnWorkspace(task, ws)) continue;
+      final id = ws['projectId'];
+      if (id is String && id.isNotEmpty) return ws;
+      fallback ??= ws;
+    }
+    return fallback;
+  }
+
+  /// Catalog rows for one card. The open workspace's live sessions-index
+  /// replaces the catalog copy of the same id when that index is ready.
+  List<SessionEntry> _cardEntries(
+    DeviceSession session,
+    Map<String, dynamic> ws,
+  ) {
+    final byId = <String, SessionEntry>{};
+    for (final t in session.relayTasks) {
+      if (!relayTaskOnWorkspace(t, ws)) continue;
+      final entry = SessionEntry.fromRelayTask(t);
+      if (entry.sessionId.isEmpty) continue;
+      byId[entry.sessionId] = entry;
+    }
+    if (_isWorkspaceActive(session, ws) && session.sessions?.ready == true) {
+      for (final e in session.sessions!.list) {
+        if (e.sessionId.isEmpty) continue;
+        byId[e.sessionId] = e;
+      }
+    }
+    final list = byId.values.toList()
+      ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
+    return list;
   }
 
   /// Every non-archived task of the device as `(entry, workspace)` pairs —
-  /// relay tasks first, live sessions-index entries overriding per id.
+  /// catalog rows first, live sessions-index entries overriding per id.
   List<(SessionEntry, Map<String, dynamic>?)> _allTaskEntries(
     DeviceSession session,
   ) {
@@ -226,21 +249,21 @@ class _TaskListPageState extends State<TaskListPage> {
     for (final t in session.relayTasks) {
       if (t['archived'] == true) continue;
       final entry = SessionEntry.fromRelayTask(t);
-      byId[entry.sessionId] = (
-        entry,
-        _workspaceForKey(session, _relayTaskKey(t)),
-      );
+      if (entry.sessionId.isEmpty) continue;
+      byId[entry.sessionId] = (entry, _workspaceForTask(session, t));
     }
-    final active = session.activeWorkspace;
     if (session.sessions?.ready == true) {
       for (final e in session.sessions!.list) {
         if (e.raw['archived'] == true) {
           // The live sessions-index is authoritative: an entry archived on
-          // the desktop must also hide a relay copy still marked active.
+          // the desktop must also hide a catalog copy still marked active.
           byId.remove(e.sessionId);
           continue;
         }
-        byId[e.sessionId] = (e, active);
+        byId[e.sessionId] = (
+          e,
+          _workspaceForTask(session, e.raw) ?? session.activeWorkspace,
+        );
       }
     }
     return byId.values.toList();
@@ -269,15 +292,29 @@ class _TaskListPageState extends State<TaskListPage> {
     return list;
   }
 
-  /// Task count for the official summary line: all non-archived tasks on
-  /// the device (falls back to the active workspace's live list).
+  /// Task count for the summary line: catalog rows plus live rows of the
+  /// open workspace, one id once. A live archived flag drops the catalog copy.
   int _totalTaskCount(DeviceSession session) {
-    final relay = session.relayTasks.where((t) => t['archived'] != true).length;
-    if (relay > 0) return relay;
-    return session.sessions?.list
-            .where((e) => e.raw['archived'] != true)
-            .length ??
-        0;
+    final ids = <String>{};
+    for (final t in session.relayTasks) {
+      if (t['archived'] == true) continue;
+      final id = t['taskId'] ?? t['sessionId'];
+      if (id != null && '$id'.isNotEmpty) ids.add('$id');
+    }
+    final live = session.sessions;
+    if (live?.ready == true) {
+      for (final e in live!.list) {
+        if (e.sessionId.isEmpty) continue;
+        if (e.raw['archived'] == true) {
+          ids.remove(e.sessionId);
+        } else {
+          ids.add(e.sessionId);
+        }
+      }
+      return ids.length;
+    }
+    if (ids.isNotEmpty) return ids.length;
+    return live?.list.where((e) => e.raw['archived'] != true).length ?? 0;
   }
 
   @override
@@ -564,11 +601,7 @@ class _TaskListPageState extends State<TaskListPage> {
           session,
           e,
           selected: e.sessionId == _paneSessionId,
-          workspace: _workspaceForKey(
-            session,
-            e.raw['workspaceIdentity'] as String? ??
-                e.raw['workspacePath'] as String?,
-          ),
+          workspace: _workspaceForTask(session, e.raw),
         ),
     ];
   }
@@ -581,11 +614,7 @@ class _TaskListPageState extends State<TaskListPage> {
     final isActive = _isWorkspaceActive(session, ws);
     final key = workspaceKeyOf(ws) ?? workspaceTitle(ws);
     final expanded = _isWorkspaceExpanded(key, isActive: isActive);
-    final sessions = isActive ? session.sessions : null;
-    // Live index for the active workspace; relay tasks for the rest.
-    final allEntries = sessions?.ready == true
-        ? sessions!.list
-        : _relayEntriesFor(session, ws);
+    final allEntries = _cardEntries(session, ws);
     final entries = _showArchived
         ? [
             for (final e in allEntries)
@@ -1168,12 +1197,7 @@ class _TaskListPageState extends State<TaskListPage> {
         ? tr(context, 'tasks.untitled')
         : entry.title;
     final ws =
-        _workspaceForKey(
-          session,
-          entry.raw['workspaceIdentity'] as String? ??
-              entry.raw['workspacePath'] as String?,
-        ) ??
-        session.activeWorkspace;
+        _workspaceForTask(session, entry.raw) ?? session.activeWorkspace;
     final subtitle = [
       if (ws != null) workspaceTitle(ws),
       relativeTimeShort(context, entry.lastActivityAt),
@@ -1297,9 +1321,10 @@ class _TaskListPageState extends State<TaskListPage> {
     final widgets = <Widget>[];
     var total = 0;
     for (final ws in session.workspaces) {
-      final entries = _sortedEntries(
-        _relayEntriesFor(session, ws, archivedOnly: true),
-      );
+      final entries = _sortedEntries([
+        for (final e in _cardEntries(session, ws))
+          if (e.raw['archived'] == true) e,
+      ]);
       if (entries.isEmpty) continue;
       total += entries.length;
       widgets
@@ -1368,16 +1393,16 @@ class _TaskListPageState extends State<TaskListPage> {
     final expanded = _isWorkspaceExpanded(key, isActive: isActive);
 
     final sessions = isActive ? session.sessions : null;
-    // Active workspace: the live sessions-index (richer phase/interaction).
-    // Others: the relay task overview — the web mobile home does the same.
-    var entries = sessions?.ready == true
-        ? sessions!.list
-        : _relayEntriesFor(session, ws);
-    entries = [
-      for (final e in entries)
+    var entries = [
+      for (final e in _cardEntries(session, ws))
         if (e.raw['archived'] != true) e,
     ];
     entries = _sortedEntries(entries);
+    final indexReady = sessions?.ready == true;
+    // Catalog rows show as soon as they arrive. The spinner is only the
+    // open workspace with nothing to show while its index is still loading.
+    final showSpinner = isActive && !indexReady && entries.isEmpty;
+    final showEmpty = isActive && indexReady && entries.isEmpty;
     final lastActivity = entries.isEmpty
         ? null
         : entries.map((e) => e.lastActivityAt).reduce((a, b) => a > b ? a : b);
@@ -1481,10 +1506,9 @@ class _TaskListPageState extends State<TaskListPage> {
               ),
             ),
           ),
-          if (expanded &&
-              (isActive ? sessions != null : entries.isNotEmpty)) ...[
+          if (expanded && (entries.isNotEmpty || showSpinner || showEmpty)) ...[
             Divider(height: 1, color: ZInk.hairline(context)),
-            if (isActive && sessions != null && !sessions.ready)
+            if (showSpinner)
               const Padding(
                 padding: EdgeInsets.all(16),
                 child: Center(
@@ -1719,6 +1743,47 @@ class _TaskListPageState extends State<TaskListPage> {
     );
   }
 
+  /// True when the bridge is already open on this folder. Another root of the
+  /// same project is a different folder and still needs a bridge switch.
+  bool _bridgeAlreadyOn(DeviceSession session, Map<String, dynamic> target) {
+    final active = session.activeWorkspace;
+    if (active == null) return false;
+    if (identical(active, target)) return true;
+    final targetPath = target['workspacePath'];
+    final activePath = active['workspacePath'];
+    if (targetPath is String &&
+        targetPath.isNotEmpty &&
+        activePath is String &&
+        activePath.isNotEmpty) {
+      return pathsEqual(targetPath, activePath);
+    }
+    return workspaceKeyOf(target) == workspaceKeyOf(active);
+  }
+
+  /// Folder the bridge should open. A project can have more than one root;
+  /// a task whose path is not the card path opens that folder instead.
+  /// The card's identity names the other root, so it is not reused.
+  Map<String, dynamic>? _workspaceToOpen(
+    DeviceSession session,
+    Map<String, dynamic>? workspace,
+    SessionEntry entry,
+  ) {
+    final taskPath = entry.raw['workspacePath'];
+    if (taskPath is! String || taskPath.isEmpty) return workspace;
+    final base = workspace ?? session.activeWorkspace;
+    final basePath = base?['workspacePath'];
+    if (basePath is String && pathsEqual(basePath, taskPath)) return workspace;
+    final taskIdentity = entry.raw['workspaceIdentity'];
+    return {
+      if (base != null) ...base,
+      'workspacePath': taskPath,
+      'workspaceIdentity':
+          taskIdentity is String && taskIdentity.trim().isNotEmpty
+              ? taskIdentity.trim()
+              : null,
+    };
+  }
+
   /// Opens a task row whatever workspace it lives in: tasks of the active
   /// workspace go straight to chat; others re-point the bridge first
   /// (workspace-bridge-open rides the taskId, web parity).
@@ -1728,13 +1793,15 @@ class _TaskListPageState extends State<TaskListPage> {
     SessionEntry entry,
     String title,
   ) async {
-    if (workspace != null && !_isWorkspaceActive(session, workspace)) {
+    final target = _workspaceToOpen(session, workspace, entry);
+    if (target != null && !_bridgeAlreadyOn(session, target)) {
       // Open-then-load: navigate immediately and let the workspace bridge
       // come up in the background. The chat page renders its own loading
       // and the subscribe retry covers the gap — the tap must always open
       // the conversation, never error out or silently no-op.
+      final opening = target;
       unawaited(
-        session.openWorkspace(workspace, taskId: entry.sessionId).catchError(
+        session.openWorkspace(opening, taskId: entry.sessionId).catchError(
               (Object e) {
                 debugPrint('[task-list] openWorkspace failed: $e');
               },
