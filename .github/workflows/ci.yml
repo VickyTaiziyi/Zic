@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Dependencies
+        run: flutter pub get
+
+      # Gate 1 — static analysis must be clean.
+      - name: Analyze
+        run: flutter analyze
+
+      # Gate 2 — full test suite.
+      - name: Test
+        run: flutter test
+
+      # Gate 3 — no secrets in the tree (pairing links, tokens, keys).
+      # Fail on any candidate; triage exceptions consciously.
+      - name: Secret scan
+        run: |
+          git grep -nIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{16,}|zcode\.z\.ai/remote/v[0-9]+\?(.*&)?sid=[A-Za-z0-9_-]{8,})' \
+            -- . ':(exclude)pubspec.lock' && {
+            echo "::error::Potential secret or live pairing link found"; exit 1; } || exit 0
+
+      - name: Build (debug, ABI-fat)
+        run: flutter build apk --debug

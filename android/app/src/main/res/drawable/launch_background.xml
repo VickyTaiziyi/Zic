@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Branded splash (light): stone-50 canvas, centered Zic mark. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/launch_bg_light" />
+    <item
+        android:drawable="@mipmap/ic_launcher"
+        android:gravity="center"
+        android:width="96dp"
+        android:height="96dp" />
+</layer-list>

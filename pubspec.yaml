@@ -1,0 +1,56 @@
+name: zic
+description: "Zic — a native, full-protocol remote for ZCode. Devices, tasks, conversations, workflows; all over the official relay."
+publish_to: "none"
+version: 1.0.15+16
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ">=1.0.8 <2.0.0"
+  flutter_inappwebview: ">=6.0.0 <7.0.0"
+  url_launcher: ">=6.0.0 <7.0.0"
+  mobile_scanner: ">=5.0.0 <8.0.0"
+  image_picker: ">=1.0.0 <2.0.0"
+  zxing2: ">=0.2.0 <0.3.0"
+  image: ">=4.0.0 <5.0.0"
+  shared_preferences: ">=2.2.0 <3.0.0"
+  # Test mock only. Device data and the login live in an app-private JSON
+  # file (see lib/state/app_kv.dart), not this plugin: its Android channel
+  # can hang and drop the app into temporary mode.
+  crypto: ">=3.0.0 <4.0.0"
+  web_socket_channel: ">=3.0.0 <4.0.0"
+  package_info_plus: ">=6.0.0 <10.0.0"
+  http: ">=1.0.0 <2.0.0"
+  flutter_local_notifications: ">=19.0.0 <23.0.0"
+  flutter_markdown: ">=0.7.0 <0.8.0"
+  markdown: ">=7.0.0 <8.0.0"
+  highlight: ">=0.7.0 <0.8.0"
+  file_picker: ">=8.0.0 <12.0.0"
+  home_widget: ">=0.9.4 <0.11.0"
+  app_links: ">=6.0.0 <7.0.0"
+  clock: ">=1.1.0 <2.0.0"
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ">=4.0.0 <7.0.0"
+  flutter_launcher_icons: ">=0.13.0 <0.15.0"
+
+# Launcher icons — regenerate with: dart run tool/icon_gen.dart && dart run flutter_launcher_icons
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: assets/icon/icon.png
+  adaptive_icon_background: "#131313"
+  adaptive_icon_foreground: assets/icon/icon_fg.png
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon/icon.png
