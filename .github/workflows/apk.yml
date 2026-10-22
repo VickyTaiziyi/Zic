@@ -100,7 +100,10 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           ASSET="zic-${VERSION}-arm64.apk"
           cp build/app/outputs/flutter-apk/app-release.apk "$ASSET"
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > release-notes.txt
+          # checkout leaves a lightweight tag, so %(contents) is the commit
+          # message. Fetch the annotated tag and use that text.
+          git fetch origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" --force
+          git for-each-ref --format='%(contents)' "refs/tags/${GITHUB_REF_NAME}" > release-notes.txt
           if [ ! -s release-notes.txt ]; then
             printf 'Zic %s\n' "$VERSION" > release-notes.txt
           fi
