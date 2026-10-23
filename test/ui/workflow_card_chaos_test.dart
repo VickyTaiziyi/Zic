@@ -225,6 +225,13 @@ class _FakeGatewayWithRun extends ChangeNotifier implements ChatGateway {
   String? get remoteUrl => null;
 
   @override
+  int get linkEpoch => 0;
+
+  @override
+  Future<WorkspaceFilePreview> previewWorkspaceFile(String path) async =>
+      WorkspaceFilePreview(path: path);
+
+  @override
   Future<ChatHandle> subscribe(String sessionId) async =>
       ChatHandle(state: _state, close: () async {});
 
