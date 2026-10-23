@@ -15,11 +15,15 @@ class ZicMarkdown extends StatelessWidget {
   final bool selectable;
   final double fontSize;
 
+  /// File and web links. Absent on surfaces that only display text.
+  final void Function(String text, String? href)? onTapLink;
+
   const ZicMarkdown(
     this.data, {
     super.key,
     this.selectable = true,
     this.fontSize = 14,
+    this.onTapLink,
   });
 
   @override
@@ -70,6 +74,9 @@ class ZicMarkdown extends StatelessWidget {
       data: data,
       selectable: selectable,
       styleSheet: styleSheet,
+      onTapLink: onTapLink == null
+          ? null
+          : (text, href, title) => onTapLink!(text, href),
       builders: {
         'code': _CodeBlockBuilder(codeFontSize: codeFont),
       },

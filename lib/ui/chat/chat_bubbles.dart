@@ -5,6 +5,7 @@ import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
+import 'file_preview.dart';
 import 'markdown_view.dart';
 
 /// Message bubbles: user bubble (collapsible, attachments), assistant
@@ -230,6 +231,31 @@ class _AttachmentViewState extends State<_AttachmentView> {
     if (_isImage) _load();
   }
 
+  Future<void> _openDocument() async {
+    final path = attachmentWorkspacePath(widget.attachment);
+    if (path != null) {
+      final resolved =
+          resolveWorkspaceFilePath(path, widget.gateway.workspacePath);
+      if (!mounted) return;
+      await showWorkspaceFilePreview(context, widget.gateway, resolved);
+      return;
+    }
+    final ref = widget.attachment['ref'] as String?;
+    if (ref == null || !mounted) return;
+    final name = '${widget.attachment['fileName'] ?? ''}';
+    await showBytesPreview(
+      context,
+      title: name.isEmpty ? tr(context, 'chat.file.preview') : name,
+      load: () async {
+        final res = await widget.gateway.attachmentRead(
+          widget.sessionId,
+          ref: ref,
+        );
+        return previewFromBytes(name, res.bytes, res.mediaType);
+      },
+    );
+  }
+
   Future<void> _load() async {
     final ref = widget.attachment['ref'] as String?;
     if (ref == null) return;
@@ -248,30 +274,36 @@ class _AttachmentViewState extends State<_AttachmentView> {
   Widget build(BuildContext context) {
     final fileName = '${widget.attachment['fileName'] ?? ''}';
     if (!_isImage) {
-      return Container(
-        margin: const EdgeInsets.only(bottom: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Material(
           color: ZInk.tile(context),
           borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.insert_drive_file_outlined,
-              size: 16,
-              color: ZInk.muted(context),
-            ),
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                fileName,
-                style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
-                overflow: TextOverflow.ellipsis,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: _openDocument,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.insert_drive_file_outlined,
+                    size: 16,
+                    color: ZInk.muted(context),
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      fileName,
+                      style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ),
             ),
-          ],
+          ),
         ),
       );
     }
@@ -343,7 +375,15 @@ class AssistantBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ZicMarkdown(text),
+          ZicMarkdown(
+            text,
+            onTapLink: (label, href) => openChatLink(
+              context,
+              gateway,
+              label,
+              href,
+            ),
+          ),
           if (showFeedback)
             Row(
               mainAxisSize: MainAxisSize.min,

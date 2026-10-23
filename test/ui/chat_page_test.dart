@@ -22,6 +22,13 @@ class FakeChatGateway extends ChangeNotifier implements ChatGateway {
   @override
   String? error;
 
+  @override
+  int linkEpoch = 0;
+
+  @override
+  Future<WorkspaceFilePreview> previewWorkspaceFile(String path) async =>
+      WorkspaceFilePreview(path: path, text: 'preview');
+
   /// Swappable (not final): the bridge-rebuild heal test swaps in a fresh
   /// state to mimic the session re-subscribing underneath the page.
   ConversationState state = ConversationState();
@@ -484,11 +491,36 @@ void main() {
       {'rowId': 1, 'kind': 'userInput', 'text': '桥换后的新消息'},
       {'rowId': 2, 'kind': 'assistantText', 'text': '新会话已接上'},
     ]);
+    gateway.linkEpoch = 1;
     gateway.notifyListeners();
     await tester.pumpAndSettle();
 
     expect(find.text('桥换后的新消息'), findsOneWidget);
     expect(find.text('新会话已接上'), findsOneWidget);
+  });
+
+  testWidgets('a notify that is not a new link leaves the open task', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'assistantText', 'text': '原来的回复'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('原来的回复'), findsOneWidget);
+
+    gateway.state = ConversationState();
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'assistantText', 'text': '不该换掉'},
+    ]);
+    gateway.notifyListeners();
+    await tester.pumpAndSettle();
+
+    expect(find.text('原来的回复'), findsOneWidget);
+    expect(find.text('不该换掉'), findsNothing);
   });
 
   testWidgets('tool call renders summary + expandable diff', (tester) async {

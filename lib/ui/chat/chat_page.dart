@@ -69,6 +69,11 @@ class _ChatPageState extends State<ChatPage> {
   ChatHandle? _handle;
   bool _subscribing = false;
   Timer? _followTimer;
+
+  /// [ChatGateway.linkEpoch] last attached. Catalog notifies leave this
+  /// alone, so a send does not tear down the task subscription.
+  int _seenEpoch = 0;
+  int _followAttempts = 0;
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
   String? _sessionId;
@@ -453,6 +458,7 @@ class _ChatPageState extends State<ChatPage> {
               await _loadOlder();
             }
           }
+          _seenEpoch = widget.gateway.linkEpoch;
           // Explicitly position at the newest message: the state listener
           // only fires on LATER updates and misses the initial snapshot.
           _scrollToBottom();
@@ -471,17 +477,19 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  /// The session notifies on workspace-bridge rebuilds; a rebuild swaps the
-  /// conversation subscriptions OUT from under this page (the heal disposes
-  /// the old ones and re-subscribes at the session level). A page holding
-  /// the dead handle freezes on whatever it built last — the stuck spinner
-  /// with a live-looking header. Re-check the subscription: dedup makes it
-  /// free when nothing changed, and only a genuine state swap does work —
-  /// no view-state/Draft/loadOlder churn per notify.
+  /// Follows a real link replacement only. A catalog refresh or a task
+  /// send also notifies the session; those must leave this subscription
+  /// where it is, or the page freezes until the user leaves and re-enters.
   void _onSessionRebuilt() {
     if (!mounted || _sessionId == null) return;
+    if (widget.gateway.linkEpoch == _seenEpoch) return;
+    _followAttempts = 0;
+    _scheduleFollow(const Duration(milliseconds: 300));
+  }
+
+  void _scheduleFollow(Duration delay) {
     _followTimer?.cancel();
-    _followTimer = Timer(const Duration(milliseconds: 300), () {
+    _followTimer = Timer(delay, () {
       unawaited(_followSubscription());
     });
   }
@@ -490,15 +498,20 @@ class _ChatPageState extends State<ChatPage> {
     final sessionId = _sessionId;
     if (!mounted || _subscribing || sessionId == null) return;
     if (_handle == null) return; // the initial _subscribe owns first attach
+    if (widget.gateway.linkEpoch == _seenEpoch) return;
     try {
       final handle = await widget.gateway
           .subscribe(sessionId)
-          .timeout(const Duration(seconds: 60));
+          .timeout(const Duration(seconds: 20));
       if (!mounted) {
         await handle.close();
         return;
       }
-      if (identical(_handle!.state, handle.state)) return;
+      if (identical(_handle!.state, handle.state)) {
+        await handle.close();
+        _seenEpoch = widget.gateway.linkEpoch;
+        return;
+      }
       final old = _handle;
       setState(() {
         _handle = handle;
@@ -506,14 +519,17 @@ class _ChatPageState extends State<ChatPage> {
       });
       handle.state.addListener(_scrollToBottom);
       unawaited(old?.close());
+      _seenEpoch = widget.gateway.linkEpoch;
       unawaited(_restoreDraft(sessionId));
       if (handle.state.canLoadOlder) {
         await _loadOlder();
       }
       _scrollToBottom();
     } catch (_) {
-      // Surface nothing here: the session-level heal / the user-visible
-      // retry path owns error reporting; this is a background follow.
+      if (!mounted || widget.gateway.linkEpoch == _seenEpoch) return;
+      _followAttempts += 1;
+      if (_followAttempts >= 8) return;
+      _scheduleFollow(const Duration(seconds: 2));
     }
   }
 

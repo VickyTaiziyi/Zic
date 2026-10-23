@@ -135,6 +135,37 @@ bool shouldPromptForVersion({
   return true;
 }
 
+/// Change lines from a GitHub release body. The product line and the
+/// platform footer are not part of what changed.
+List<String> updateChangeLines(String? body) {
+  if (body == null) return const [];
+  final lines = <String>[];
+  for (final raw in body.split(RegExp(r'\r?\n'))) {
+    var line = raw.trim();
+    if (line.isEmpty) continue;
+    line = line.replaceFirst(RegExp(r'^[-*•]\s+'), '');
+    if (line.isEmpty || _updateBoilerplate(line)) continue;
+    lines.add(line);
+  }
+  return lines;
+}
+
+bool _updateBoilerplate(String line) {
+  final t = line.toLowerCase();
+  if (RegExp(r'^zic\s+\d').hasMatch(t)) return true;
+  if (t.contains('安卓远程客户端')) return true;
+  if (t.contains('android remote client')) return true;
+  if (t.contains('android 8')) return true;
+  if (t.contains('arm64')) return true;
+  if (t.contains('不下载安装包')) return true;
+  if (t.contains('does not download')) return true;
+  if (t.contains('does not install')) return true;
+  if (t.contains('更新会打开浏览器')) return true;
+  if (t.contains('opens the browser')) return true;
+  if (t.contains('open the browser')) return true;
+  return false;
+}
+
 /// Semantic version compare on the first three numeric segments
 /// (`major.minor.patch`). Handles `1.2` vs `1.2.0` as equal.
 int compareVersions(String a, String b) {

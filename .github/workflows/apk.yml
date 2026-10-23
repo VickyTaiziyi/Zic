@@ -35,7 +35,7 @@ jobs:
         run: flutter test
 
       - name: Release keystore
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
@@ -54,7 +54,7 @@ jobs:
           ZIC_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/v* || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             if [ -z "${ZIC_KEYSTORE_PASSWORD}" ] || [ -z "${ZIC_KEY_ALIAS}" ] || [ -z "${ZIC_KEY_PASSWORD}" ]; then
               echo "::error::release signing secrets are incomplete"
               exit 1
@@ -85,11 +85,8 @@ jobs:
         with:
           name: zic-apks
           retention-days: 14
-          path: |
-            build/app/outputs/flutter-apk/app-release.apk
-            build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-            build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-            build/app/outputs/flutter-apk/app-x86_64-release.apk
+          if-no-files-found: warn
+          path: build/app/outputs/flutter-apk/*.apk
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')

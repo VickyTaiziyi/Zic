@@ -27,12 +27,16 @@ class ToolCallTile extends StatelessWidget {
   /// Run-details entry (workflow card ⤢ / more row).
   final void Function(Map<String, dynamic> liveRun)? onOpenRunDetails;
 
+  /// Desktop document written by this call. The phone reads it back.
+  final void Function(String path)? onPreviewFile;
+
   const ToolCallTile({
     super.key,
     required this.row,
     this.state,
     this.onOpenActor,
     this.onOpenRunDetails,
+    this.onPreviewFile,
   });
 
   @override
@@ -93,6 +97,7 @@ class ToolCallTile extends StatelessWidget {
     }
 
     final summary = _toolSummary(context, row, diff);
+    final previewPath = _writtenPath(row, inputText, diff);
 
     // Official tool row: bold-ish first line (已写入 <file> / 终端 · cmd /
     // 探索 · N 文件) with +/- counts right-aligned; second line = directory
@@ -155,6 +160,18 @@ class ToolCallTile extends StatelessWidget {
             leading: Icon(icon, size: 15, color: color),
             title: title,
             subtitle: subtitle,
+            trailing: previewPath == null || onPreviewFile == null
+                ? null
+                : IconButton(
+                    tooltip: tr(context, 'chat.file.preview'),
+                    visualDensity: VisualDensity.compact,
+                    icon: Icon(
+                      Icons.visibility_outlined,
+                      size: 18,
+                      color: ZInk.muted(context),
+                    ),
+                    onPressed: () => onPreviewFile!(previewPath),
+                  ),
             children: [
               if (inputText.isNotEmpty)
                 _kv(context, tr(context, 'chat.tool.input'), inputText),
@@ -507,6 +524,37 @@ class ToolCallTile extends StatelessWidget {
       additions: diff?.additions ?? 0,
       deletions: diff?.deletions ?? 0,
     );
+  }
+
+  static String? _writtenPath(
+    Map<String, dynamic> row,
+    String inputText,
+    DiffData? diff,
+  ) {
+    final toolName = (row['toolName'] as String? ?? '').toLowerCase();
+    if (!(toolName.contains('write') ||
+        toolName.contains('edit') ||
+        toolName.contains('notebook'))) {
+      return null;
+    }
+    return _filePath(inputText) ??
+        _filePathFromMap(row['input']) ??
+        diff?.filePath;
+  }
+
+  static String? _filePathFromMap(Object? input) {
+    if (input is! Map) return null;
+    for (final key in const [
+      'filePath',
+      'file_path',
+      'path',
+      'file',
+      'notebookPath',
+    ]) {
+      final value = input[key];
+      if (value is String && value.isNotEmpty) return value;
+    }
+    return null;
   }
 
   static String? _filePath(String inputText) {

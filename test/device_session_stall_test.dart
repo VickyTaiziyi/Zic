@@ -231,4 +231,55 @@ void main() {
     await until(() => session.status == DeviceStatus.connected);
     await session.dispose();
   });
+
+  test('a workspace miss does not rebuild the link', () async {
+    var created = 0;
+    final session = DeviceSession(
+      deviceId: 'd1',
+      params: paramsOf(),
+      timings: const StallTimings(
+        healthyWaitTimeout: Duration(milliseconds: 40),
+        rpcTimeout: Duration(milliseconds: 70),
+        dialTimeout: Duration(milliseconds: 60),
+        listReadyTimeout: Duration(milliseconds: 30),
+        minRebuildInterval: Duration(milliseconds: 5),
+        retryBackoff: Duration(milliseconds: 60),
+      ),
+      clientFactory: () {
+        created += 1;
+        return StubRemoteClient(paramsOf());
+      },
+    );
+    unawaited(session.connect());
+    await until(() => session.status == DeviceStatus.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+    expect(created, 1);
+    expect(session.error, contains('workspace-bridge-error'));
+    await session.dispose();
+  });
+
+  test('an open task keeps the link when a side call times out', () async {
+    var created = 0;
+    final session = DeviceSession(
+      deviceId: 'd1',
+      params: paramsOf(),
+      timings: fastTimings,
+      clientFactory: () {
+        created += 1;
+        return StubRemoteClient(paramsOf());
+      },
+    );
+    session.debugAttachGateForTest(FakeGate(healthy: true));
+    session.debugHoldTaskForTest();
+    unawaited(session.connect());
+    await until(() => session.status == DeviceStatus.connected);
+    final before = created;
+    unawaited(session
+        .callChannel('usage-stats', 'overview')
+        .catchError((Object _) {}));
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(created, before);
+    expect(session.status, DeviceStatus.connected);
+    await session.dispose();
+  });
 }

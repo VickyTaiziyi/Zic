@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.17+18 — 2026-10-23
+
+- A reply stays on the open task. Sending a message no longer marks the
+  link down or reconnects when the desktop refuses another folder.
+- Documents written on the desktop open from the chat.
+- The update dialog lists what changed in the release.
+
 ## 1.0.16+17 — 2026-10-22
 
 - The task home loads every ZCode project, not only the open workspace.

@@ -6,6 +6,7 @@ import '../theme.dart';
 import '../ui_settings.dart';
 import 'chat_bubbles.dart';
 import 'chat_page.dart';
+import 'file_preview.dart';
 import 'workflow_run_page.dart';
 import 'session_sheets.dart';
 import 'tool_call_tile.dart';
@@ -517,6 +518,11 @@ class _RowWidget extends StatelessWidget {
                 readOnly: true,
               ),
             ));
+          },
+          onPreviewFile: (path) {
+            final resolved =
+                resolveWorkspaceFilePath(path, gateway.workspacePath);
+            showWorkspaceFilePreview(context, gateway, resolved);
           },
           onOpenRunDetails: (liveRun) {
             Navigator.of(context).push(MaterialPageRoute(

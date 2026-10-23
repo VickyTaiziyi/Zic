@@ -60,20 +60,16 @@ Future<void> presentGithubUpdate(BuildContext context,
       }
     }
     if (!context.mounted) return;
+    final changes = updateChangeLines(update.body);
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title:
             Text(trP(context, 'update.newVersion', [update.latestVersion])),
-        content: (update.body ?? '').trim().isEmpty
-            ? Text(tr(context, 'update.availableBody'))
-            : SizedBox(
-                width: 420,
-                child: SingleChildScrollView(
-                  child: SelectableText(update.body!,
-                      style: const TextStyle(fontSize: 12, height: 1.5)),
-                ),
-              ),
+        content: SizedBox(
+          width: 420,
+          child: _UpdateChanges(lines: changes),
+        ),
         actions: [
           TextButton(
             onPressed: () async {
@@ -107,6 +103,44 @@ Future<void> presentGithubUpdate(BuildContext context,
     if (silent || !context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(tr(context, 'update.failed'))));
+  }
+}
+
+/// The release's change lines. The product sentence and the platform
+/// footer are left off the dialog.
+class _UpdateChanges extends StatelessWidget {
+  final List<String> lines;
+
+  const _UpdateChanges({required this.lines});
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = lines.isEmpty
+        ? [tr(context, 'update.availableBody')]
+        : lines;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 280),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              tr(context, 'update.changes'),
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            for (final line in shown)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  line,
+                  style: const TextStyle(fontSize: 14, height: 1.5),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

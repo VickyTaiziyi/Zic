@@ -8,6 +8,24 @@ import 'package:zic/update/update_prompt.dart';
 import 'package:zic/update/update_service.dart';
 
 void main() {
+  group('update change lines', () {
+    test('keeps the change and drops the product and platform lines', () {
+      const body = '''
+Zic 1.0.17，给 ZCode 桌面端用的安卓远程客户端。
+
+发消息后，回复留在当前任务里。
+
+可以预览电脑上写出的文档。
+
+Android 8.0 及以上，仅 arm64-v8a。应用不下载安装包，更新会打开浏览器。
+''';
+      expect(updateChangeLines(body), [
+        '发消息后，回复留在当前任务里。',
+        '可以预览电脑上写出的文档。',
+      ]);
+    });
+  });
+
   group('compareVersions', () {
     test('equal versions', () {
       expect(compareVersions('1.0.0', '1.0.0'), 0);

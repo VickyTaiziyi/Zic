@@ -15,6 +15,14 @@ import '../protocol/remote_client.dart';
 import '../protocol/task_commands.dart';
 import 'device_store.dart';
 import 'project_tree.dart';
+import 'workspace_file.dart';
+
+export 'workspace_file.dart';
+
+/// The desktop rejected the folder because it is not an open tab of the
+/// current window. The relay itself is still up.
+bool isWorkspaceBridgeMiss(Object error) =>
+    '$error'.contains('workspace-bridge-error');
 
 /// Mirrors `HC()` in the web client:
 /// key = workspaceIdentity?.trim() || workspacePath.
@@ -353,6 +361,12 @@ abstract interface class ChatGateway implements Listenable {
   /// Skills synchronously from the last known list (mention picker reads
   /// this without awaiting a fresh RPC).
   List<Map<String, dynamic>> mentionSkillsSync();
+
+  /// Changes only when the link is replaced. Catalog updates do not.
+  int get linkEpoch;
+
+  /// Reads a document the desktop wrote. Does not rebuild the link.
+  Future<WorkspaceFilePreview> previewWorkspaceFile(String path);
 }
 
 /// One native protocol connection to one device. Owns the full stack
@@ -443,6 +457,18 @@ class DeviceSession extends ChangeNotifier
   /// Wall clock of the last forced rebuild, for debouncing.
   DateTime _lastStallRebuildAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _rebuilding = false;
+
+  /// Bumped only when the link itself is replaced. An open chat follows
+  /// this, not every catalog refresh.
+  int _linkEpoch = 0;
+
+  /// Set when the desktop refuses a folder that is not in the current
+  /// window. Rebuilding the relay does not open that folder.
+  String? _openMiss;
+
+  /// Test seam: treat a task as open so a side-call timeout cannot
+  /// suspend the link.
+  bool _holdTask = false;
 
   /// Test seam overriding the live bridge gate in [callChannel].
   WorkspaceGate? _testGate;
@@ -932,22 +958,34 @@ class DeviceSession extends ChangeNotifier
       }
       _sessionsSub = sub;
       sub.state.addListener(_onSessionsChanged);
+      _openMiss = null;
       _error = null;
+      _linkEpoch += 1;
       onWorkspaceOpened?.call(key);
       notifyListeners();
     } catch (e) {
       _log('[session] workspace open failed: $e');
-      // The relay link itself is fine; only the native list is degraded —
-      // surface the reason so the UI can offer retry / web fallback
-      // instead of an eternal spinner.
-      _error = '$e';
-      notifyListeners();
+      // A folder that is not open in the current desktop window is not a
+      // dropped link. Keep the bridge and the task already on screen.
+      // Rebuilding would only show 「重连中」 and freeze that task.
+      if (isWorkspaceBridgeMiss(e)) {
+        _openMiss = '$e';
+        if (_bridge == null) {
+          _error = '$e';
+          notifyListeners();
+        }
+      } else {
+        _openMiss = null;
+        _error = '$e';
+        notifyListeners();
+      }
     } finally {
       _openingWorkspace = false;
       sw.stop();
       // Connected-but-never-ready (open failed OR subscribed with no
       // snapshot yet) is exactly the cold-start loading bug: guard it.
-      _armListWatchdog();
+      // A window miss is not that bug.
+      if (_openMiss == null) _armListWatchdog();
       if (_bridge != null && !_disposed) unawaited(_refreshCatalog());
     }
   }
@@ -966,6 +1004,9 @@ class DeviceSession extends ChangeNotifier
     );
     _catalogTimer?.cancel();
     _catalogTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      // A catalog poll shares the bridge with the open task. Skip it
+      // while that task is subscribed so it cannot crowd the live frames.
+      if (_chatSubs.isNotEmpty) return;
       unawaited(_refreshCatalog());
     });
   }
@@ -1111,6 +1152,7 @@ class DeviceSession extends ChangeNotifier
   /// suspend/connect teardowns via the shared cancel points.
   void _armListWatchdog() {
     _listWatchdog?.cancel();
+    if (_openMiss != null) return;
     if (_disposed || status != DeviceStatus.connected) return;
     final sub = _sessionsSub;
     if (sub != null && sub.state.ready) return;
@@ -1262,7 +1304,7 @@ class DeviceSession extends ChangeNotifier
     try {
       await gate.waitHealthy(timeout: timings.healthyWaitTimeout);
     } on TimeoutException {
-      _forceRebuildAfterStall(
+      _rebuildUnlessTaskOpen(
         'workspace bridge unhealthy > ${timings.healthyWaitTimeout.inSeconds}s',
       );
       rethrow;
@@ -1270,10 +1312,27 @@ class DeviceSession extends ChangeNotifier
     try {
       return await gate.call(channel, method, args).timeout(timings.rpcTimeout);
     } on TimeoutException {
-      _forceRebuildAfterStall('$channel.$method timed out');
+      _rebuildUnlessTaskOpen('$channel.$method timed out');
       rethrow;
     }
   }
+
+  /// A side call that stalls must not suspend the link while a task is
+  /// open. The reply stays on that task. With no task open, the old
+  /// stall policy still rebuilds a wedged bridge.
+  bool _rebuildUnlessTaskOpen(String reason) {
+    if (_chatSubs.isNotEmpty || _holdTask) {
+      _log('[session] $reason; the open task stays on this link');
+      return false;
+    }
+    return _forceRebuildAfterStall(reason);
+  }
+
+  @visibleForTesting
+  void debugHoldTaskForTest() => _holdTask = true;
+
+  @override
+  int get linkEpoch => _linkEpoch;
 
   WorkspaceGate? _liveGate() {
     final bridge = _bridge;
@@ -1446,7 +1505,7 @@ class DeviceSession extends ChangeNotifier
       // (the eternal-loading-spinner report). The debounced policy shares
       // one rebuild across parallel failures.
       if (e is TimeoutException) {
-        _forceRebuildAfterStall('subscribe $sessionId timed out');
+        _rebuildUnlessTaskOpen('subscribe $sessionId timed out');
       }
       rethrow;
     } finally {
@@ -1871,6 +1930,56 @@ class DeviceSession extends ChangeNotifier
   }
 
   @override
+  Future<WorkspaceFilePreview> previewWorkspaceFile(String path) async {
+    final resolved = path.trim();
+    if (resolved.isEmpty || _bridge == null) {
+      return WorkspaceFilePreview(path: path, error: 'not connected');
+    }
+    Object? textError;
+    try {
+      final res = await _bridgeCall(Channels.file, 'readTextFile', [
+        {'path': resolved, 'length': 262144},
+      ]);
+      if (res is Map && res['isBinary'] != true && res['content'] is String) {
+        return WorkspaceFilePreview(
+          path: '${res['path'] ?? resolved}',
+          text: res['content'] as String,
+          truncated: res['truncated'] == true,
+        );
+      }
+    } catch (e) {
+      textError = e;
+    }
+    final image = await _readImagePreview(resolved);
+    if (image != null) return image;
+    if (textError != null) {
+      return WorkspaceFilePreview(path: resolved, error: '$textError');
+    }
+    return WorkspaceFilePreview(path: resolved, binary: true);
+  }
+
+  Future<WorkspaceFilePreview?> _readImagePreview(String path) async {
+    try {
+      final res = await _bridgeCall(Channels.file, 'readMediaPreview', [
+        {'path': path, 'maxBytes': 1500000},
+      ]);
+      if (res is! Map) return null;
+      final data = res['dataBase64'];
+      final media = '${res['mediaType'] ?? ''}';
+      if (data is! String || data.isEmpty || !media.startsWith('image/')) {
+        return null;
+      }
+      return WorkspaceFilePreview(
+        path: '${res['path'] ?? path}',
+        bytes: base64Decode(data),
+        mediaType: media,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
   List<Map<String, dynamic>> mentionSkillsSync() {
     return [
       for (final s in (conversation?.lastSkills ?? const <SkillEntry>[]))
@@ -1908,6 +2017,9 @@ class DeviceSession extends ChangeNotifier
     _conversation = null;
     _sessionsSub = null;
     _chatSubs.clear();
+    _chatSubRefs.clear();
+    _openMiss = null;
+    _linkEpoch += 1;
     _activeWorkspace = null;
     _workspaces = [];
     _relayTasks = [];
