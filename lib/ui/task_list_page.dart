@@ -79,12 +79,65 @@ class _TaskListPageState extends State<TaskListPage> {
   /// `zcode-web-remote-control-mobile-task-home-preferences`, same default).
   static const _organizePrefsKey = 'zic_task_organize_v1';
 
+  /// Workspace the open right-hand chat was last checked against.
+  String? _observedWorkspaceKey;
+  DeviceSession? _observedSession;
+
   @override
   void initState() {
     super.initState();
     _paneSessionId = widget.initialPaneSessionId;
     _paneTitle = widget.initialPaneTitle;
+    widget.hub.addListener(_onHubOrSession);
+    _observeSession();
     _loadOrganizePrefs();
+  }
+
+  @override
+  void dispose() {
+    widget.hub.removeListener(_onHubOrSession);
+    _observedSession?.removeListener(_onHubOrSession);
+    super.dispose();
+  }
+
+  void _observeSession() {
+    final next = _session;
+    if (identical(next, _observedSession)) return;
+    _observedSession?.removeListener(_onHubOrSession);
+    _observedSession = next;
+    next?.addListener(_onHubOrSession);
+    _observedWorkspaceKey = next?.activeWorkspace == null
+        ? null
+        : workspaceKeyOf(next!.activeWorkspace!);
+  }
+
+  void _onHubOrSession() {
+    _observeSession();
+    _closePaneIfWorkspaceLeft();
+  }
+
+  /// The right pane is one conversation. Switching to a workspace that
+  /// does not own it used to leave that conversation on screen.
+  void _closePaneIfWorkspaceLeft() {
+    final session = _session;
+    final id = _paneSessionId;
+    if (session == null || id == null) return;
+    final active = session.activeWorkspace;
+    final key = active == null ? null : workspaceKeyOf(active);
+    if (key == _observedWorkspaceKey) return;
+    final previous = _observedWorkspaceKey;
+    _observedWorkspaceKey = key;
+    if (previous == null || active == null) return;
+    final catalog = _catalogTask(session, id);
+    if (catalog == null || relayTaskOnWorkspace(catalog, active)) return;
+    if (!session.workspaces.any((ws) => relayTaskOnWorkspace(catalog, ws))) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _paneSessionId = null;
+      _paneTitle = null;
+    });
   }
 
   Future<void> _loadOrganizePrefs() async {
@@ -216,8 +269,58 @@ class _TaskListPageState extends State<TaskListPage> {
     return fallback;
   }
 
+  Map<String, dynamic>? _catalogTask(DeviceSession session, String sessionId) {
+    for (final t in session.relayTasks) {
+      final id = '${t['taskId'] ?? t['sessionId'] ?? ''}';
+      if (id.isNotEmpty && id == sessionId) return t;
+    }
+    return null;
+  }
+
+  /// True when [task] does not match [ws] and does match some other card.
+  bool _belongsToAnotherWorkspace(
+    DeviceSession session,
+    Map<String, dynamic> task,
+    Map<String, dynamic> ws,
+  ) {
+    if (relayTaskOnWorkspace(task, ws)) return false;
+    for (final other in session.workspaces) {
+      if (identical(other, ws)) continue;
+      if (relayTaskOnWorkspace(task, other)) return true;
+    }
+    return false;
+  }
+
+  /// Live index rows often omit project and path. Keep the catalog's copy
+  /// so a later workspace switch can still tell whose session it is.
+  SessionEntry _liveWithCatalogWorkspace(
+    SessionEntry live,
+    Map<String, dynamic>? catalog,
+  ) {
+    if (catalog == null) return live;
+    final raw = Map<String, dynamic>.from(live.raw);
+    var changed = false;
+    for (final key in const [
+      'projectId',
+      'workspacePath',
+      'workspaceIdentity',
+    ]) {
+      final current = raw[key];
+      final empty =
+          current == null || (current is String && current.trim().isEmpty);
+      final fromCatalog = catalog[key];
+      if (empty && fromCatalog != null && '$fromCatalog'.isNotEmpty) {
+        raw[key] = fromCatalog;
+        changed = true;
+      }
+    }
+    return changed ? SessionEntry(raw) : live;
+  }
+
   /// Catalog rows for one card. The open workspace's live sessions-index
   /// replaces the catalog copy of the same id when that index is ready.
+  /// A live row the catalog already filed under another workspace stays
+  /// on that workspace.
   List<SessionEntry> _cardEntries(
     DeviceSession session,
     Map<String, dynamic> ws,
@@ -232,7 +335,17 @@ class _TaskListPageState extends State<TaskListPage> {
     if (_isWorkspaceActive(session, ws) && session.sessions?.ready == true) {
       for (final e in session.sessions!.list) {
         if (e.sessionId.isEmpty) continue;
-        byId[e.sessionId] = e;
+        final catalog = _catalogTask(session, e.sessionId);
+        if (catalog != null &&
+            _belongsToAnotherWorkspace(session, catalog, ws)) {
+          byId.remove(e.sessionId);
+          continue;
+        }
+        if (_belongsToAnotherWorkspace(session, e.raw, ws)) {
+          byId.remove(e.sessionId);
+          continue;
+        }
+        byId[e.sessionId] = _liveWithCatalogWorkspace(e, catalog);
       }
     }
     final list = byId.values.toList()
@@ -260,9 +373,11 @@ class _TaskListPageState extends State<TaskListPage> {
           byId.remove(e.sessionId);
           continue;
         }
+        final catalog = _catalogTask(session, e.sessionId);
+        final hinted = _liveWithCatalogWorkspace(e, catalog);
         byId[e.sessionId] = (
-          e,
-          _workspaceForTask(session, e.raw) ?? session.activeWorkspace,
+          hinted,
+          _workspaceForTask(session, hinted.raw) ?? session.activeWorkspace,
         );
       }
     }

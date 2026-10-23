@@ -350,12 +350,18 @@ class FakeChatGateway extends ChangeNotifier implements ChatGateway {
     return runArtifactBytesFixture;
   }
 
+  /// When set, [rowsRange] returns this instead of an empty ack.
+  Object? rowsRangeResult;
+
   @override
   Future<dynamic> rowsRange(
     String sessionId, {
     int? beforeRowId,
     int limit = 60,
-  }) async => _rec('rowsRange', [sessionId, beforeRowId, limit]);
+  }) async {
+    calls.add(('rowsRange', [sessionId, beforeRowId, limit]));
+    return rowsRangeResult ?? {'status': 'accepted'};
+  }
 
   @override
   Future<Map<String, dynamic>> attachmentPut(
@@ -1658,5 +1664,84 @@ void main() {
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
     expect(find.text('取消置顶任务'), findsOneWidget);
+  });
+
+  testWidgets('opening a session does not prefetch older rows', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(400, 640);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    final hung = Completer<Object?>();
+    gateway.rowsRangeResult = hung.future;
+    gateway.feedSnapshot([
+      for (var i = 2; i <= 12; i++)
+        {'rowId': i, 'kind': 'userInput', 'text': '近期 $i', 'state': 'done'},
+    ], firstRowId: 1, totalCount: 12);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(gateway.calls.where((c) => c.$1 == 'rowsRange'), isEmpty);
+    expect(find.textContaining('近期'), findsWidgets);
+  });
+
+  testWidgets('load older stays on the earlier messages', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(400, 640);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    gateway.rowsRangeResult = {
+      'hasMore': false,
+      'atLogEpoch': 'e1',
+      'rows': {
+        'window': [
+          {
+            'rowId': 1,
+            'kind': 'userInput',
+            'text': '更早的消息',
+            'state': 'done',
+          },
+        ],
+        'firstRowId': 1,
+      },
+    };
+    gateway.feedSnapshot([
+      for (var i = 2; i <= 16; i++)
+        {'rowId': i, 'kind': 'userInput', 'text': '近期 $i', 'state': 'done'},
+    ], firstRowId: 1, totalCount: 16);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final scrollable = find.ancestor(
+      of: find.textContaining('近期').first,
+      matching: find.byType(Scrollable),
+    );
+    final position = tester.state<ScrollableState>(scrollable).position;
+    position.jumpTo(0);
+    await tester.pump();
+    expect(find.text('加载更早消息'), findsOneWidget);
+    await tester.tap(find.text('加载更早消息'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('更早的消息'), findsOneWidget);
+    expect(position.maxScrollExtent, greaterThan(200));
+    expect(position.pixels, lessThan(80));
+
+    gateway.feedSnapshot([
+      for (var i = 2; i <= 16; i++)
+        {'rowId': i, 'kind': 'userInput', 'text': '近期 $i', 'state': 'done'},
+      {'rowId': 17, 'kind': 'assistantText', 'text': '新的回复', 'state': 'done'},
+    ], firstRowId: 1, totalCount: 17);
+    await tester.pump();
+    expect(find.text('更早的消息'), findsOneWidget);
+    expect(gateway.state.rows.last['text'], '新的回复');
+    expect(gateway.state.rows.first['text'], '更早的消息');
+    expect(position.pixels, lessThan(80));
   });
 }

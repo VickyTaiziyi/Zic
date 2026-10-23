@@ -345,6 +345,47 @@ void main() {
       expect(state.firstRowId, 1);
     });
 
+    test('snapshot keeps rows already loaded above the new tail', () {
+      _injectSnapshot(state, seq: 5, rows: [
+        {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
+      ], totalCount: 10, firstRowId: 1, snapshot: {'logEpoch': 'e1'});
+      state
+        ..hasMore = true
+        ..prependOlderRows([
+          {'rowId': 8, 'kind': 'userInput', 'text': 'older'},
+          {'rowId': 9, 'kind': 'assistantText', 'text': 'older-2'},
+        ], 8);
+
+      _injectSnapshot(state, seq: 6, rows: [
+        {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
+        {'rowId': 11, 'kind': 'assistantText', 'text': 'reply'},
+      ], totalCount: 11, firstRowId: 1, snapshot: {'logEpoch': 'e1'});
+
+      expect(state.rows.map((r) => r['rowId']), [8, 9, 10, 11]);
+      expect(state.firstRowId, 8);
+      expect(state.hasMore, isTrue);
+      expect(state.rows.last['text'], 'reply');
+    });
+
+    test('snapshot drops paged rows when the log epoch changes', () {
+      _injectSnapshot(state, seq: 5, rows: [
+        {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
+      ], totalCount: 10, firstRowId: 1, snapshot: {'logEpoch': 'e1'});
+      state
+        ..hasMore = true
+        ..prependOlderRows([
+          {'rowId': 8, 'kind': 'userInput', 'text': 'older'},
+        ], 8);
+
+      _injectSnapshot(state, seq: 6, rows: [
+        {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
+      ], totalCount: 10, firstRowId: 1, snapshot: {'logEpoch': 'e2'});
+
+      expect(state.rows.map((r) => r['rowId']), [10]);
+      expect(state.firstRowId, 10);
+      expect(state.hasMore, isNull);
+    });
+
     test('prependOlderRows deduplicates by rowId', () {
       _injectSnapshot(state, rows: [
         {'rowId': 2, 'kind': 'assistant', 'text': 'existing'},

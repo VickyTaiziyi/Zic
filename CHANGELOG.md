@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.19+20 — 2026-10-23
+
+- Loading earlier messages stays on those messages. A later refresh keeps them.
+- Opening the current session no longer fetches an extra page of history first.
+- A session filed under one workspace stays on that workspace when you switch.
+
 ## 1.0.18+19 — 2026-10-23
 
 - Sending a message shows that message on the open conversation. The reply

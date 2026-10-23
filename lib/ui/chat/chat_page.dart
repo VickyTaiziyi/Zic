@@ -85,6 +85,11 @@ class _ChatPageState extends State<ChatPage> {
   int _catchUpGen = 0;
   Timer? _catchUpTimer;
   bool _loadingOlder = false;
+
+  /// Set while a load-older prepend is being anchored. A list that still
+  /// fits on screen reports "at the bottom", and the state listener would
+  /// otherwise animate to the new tail and hide the rows just loaded.
+  bool _holdHistory = false;
   bool _showSlash = false;
 
   /// @-mention picker state (see _maybeOpenMentionPicker).
@@ -459,12 +464,6 @@ class _ChatPageState extends State<ChatPage> {
           widget.gateway.sendViewState(taskId: sessionId);
           if (!sameSubscription) {
             unawaited(_restoreDraft(sessionId));
-            // The server snapshot is a tail window (can be as few as 3 rows).
-            // The official client shows the full history immediately, so
-            // auto-load the missing older rows once on open.
-            if (handle.state.canLoadOlder) {
-              await _loadOlder();
-            }
           }
           // Record the epoch this handle was actually opened against. A
           // link swap that lands while subscribe is still in flight must
@@ -545,9 +544,6 @@ class _ChatPageState extends State<ChatPage> {
       unawaited(old?.close());
       _seenEpoch = widget.gateway.linkEpoch;
       unawaited(_restoreDraft(sessionId));
-      if (handle.state.canLoadOlder) {
-        await _loadOlder();
-      }
       _scrollToBottom();
     } catch (_) {
       if (!mounted || widget.gateway.linkEpoch == _seenEpoch) return;
@@ -558,18 +554,16 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   void _scrollToBottom() {
+    if (_holdHistory || _loadingOlder) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
+      if (!mounted || _holdHistory || _loadingOlder) return;
+      if (!_scrollController.hasClients || !_stickToBottom) return;
       final max = _scrollController.position.maxScrollExtent;
-      // Snap to the newest message on open; afterwards only follow while the
-      // user is already near the bottom (so reading history isn't yanked).
-      if (_stickToBottom || _scrollController.position.pixels > max - 400) {
-        _scrollController.animateTo(
-          max,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
+      _scrollController.animateTo(
+        max,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -904,6 +898,9 @@ class _ChatPageState extends State<ChatPage> {
       if (!_catchUpCurrent(gen, sessionId) || _replyVisible(text)) return;
       final seq = _state?.seq ?? 0;
       if (seq != baseline) return;
+      // A history page is on screen. Pulling a snapshot here rebuilds the
+      // list under the viewport the user just anchored.
+      if (_loadingOlder || _holdHistory) continue;
       await _pullSnapshot(sessionId);
       if (!_catchUpCurrent(gen, sessionId) || _replyVisible(text)) return;
       final moved = await _waitForSeq(gen, sessionId, baseline);
@@ -1010,14 +1007,14 @@ class _ChatPageState extends State<ChatPage> {
     final sessionId = _sessionId;
     if (state == null || sessionId == null || _loadingOlder) return;
     setState(() => _loadingOlder = true);
-    // Bottom-anchored viewport: prepending shifts content down, so remember
-    // the distance-from-bottom and restore it after the insertion frame —
-    // the user keeps reading exactly where they were and can scroll up.
-    final pxBefore =
-        _scrollController.hasClients ? _scrollController.offset : null;
-    final bottomBefore = _scrollController.hasClients
-        ? _scrollController.position.maxScrollExtent
-        : null;
+    // The button lives at the top. A short transcript still counts as
+    // "stuck to the bottom" (pixels == max == 0), so following the tail
+    // after the prepend hides the page that just arrived.
+    _holdHistory = true;
+    _stickToBottom = false;
+    if (_scrollController.hasClients) {
+      _scrollController.jumpTo(_scrollController.offset);
+    }
     try {
       final res = await widget.gateway.rowsRange(
         sessionId,
@@ -1060,20 +1057,10 @@ class _ChatPageState extends State<ChatPage> {
         state
           ..hasMore = hasMore
           ..prependOlderRows(older, firstRowId);
-        if (_stickToBottom) {
-          _scrollToBottom();
-        } else if (pxBefore != null && bottomBefore != null) {
-          // Restore the viewport: distance-from-bottom is invariant when
-          // content is inserted above the visible range.
-          final distBefore = bottomBefore - pxBefore;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!_scrollController.hasClients) return;
-            _scrollController.jumpTo(
-              (_scrollController.position.maxScrollExtent - distBefore)
-                  .clamp(0.0, _scrollController.position.maxScrollExtent),
-            );
-          });
-        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!_scrollController.hasClients) return;
+          _scrollController.jumpTo(0);
+        });
       } else if (state.rows.isNotEmpty) {
         state.hasMore = hasMore ?? false;
         if (mounted) _toast(tr(context, 'chat.noOlder'));
@@ -1082,6 +1069,11 @@ class _ChatPageState extends State<ChatPage> {
       if (mounted) _toast(trP(context, 'chat.loadOlder.failed', ['$e']));
     } finally {
       if (mounted) setState(() => _loadingOlder = false);
+      // Release after the anchor frame. Clearing it here would let the
+      // prepend notification animate back to the newest row.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _holdHistory = false;
+      });
     }
   }
 

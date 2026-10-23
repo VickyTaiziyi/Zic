@@ -779,4 +779,140 @@ void main() {
     expect(session.activeWorkspace?['workspaceIdentity'], isNull);
     expect(find.byType(ChatPage), findsOneWidget);
   });
+
+  testWidgets('a live session filed under another project stays there', (
+    tester,
+  ) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 'mine',
+          'title': '本工作区',
+          'phase': 'idle',
+          'lastActivityAt': now,
+        },
+        {
+          'sessionId': 'ops1',
+          'title': '串台任务',
+          'phase': 'idle',
+          'lastActivityAt': now,
+        },
+      ],
+      workspaces: [
+        {
+          'workspacePath': r'D:\Code\projects\Zic',
+          'workspaceIdentity': 'zic-id',
+          'label': 'Zic',
+          'projectId': 'p-zic',
+        },
+        {
+          'workspacePath': r'D:\AI\ops',
+          'workspaceIdentity': 'ops-id',
+          'label': 'operations',
+          'projectId': 'p-ops',
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 'ops1',
+          'title': '巡检通知',
+          'projectId': 'p-ops',
+          'workspacePath': r'D:\AI\ops',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('本工作区'), findsOneWidget);
+    expect(find.text('串台任务'), findsNothing);
+    expect(find.text('巡检通知'), findsNothing);
+
+    await tester.tap(find.text('operations'));
+    await tester.pump();
+    expect(
+      find.descendant(of: cardOf('operations'), matching: find.text('巡检通知')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: cardOf('Zic'), matching: find.text('串台任务')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('switching workspace closes a chat that belongs elsewhere', (
+    tester,
+  ) async {
+    useDesktop(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '任务甲',
+          'phase': 'idle',
+          'lastActivityAt': now,
+        },
+      ],
+      workspaces: [
+        {
+          'workspacePath': '/repo/alpha',
+          'workspaceIdentity': 'alpha',
+          'label': 'alpha',
+        },
+        {
+          'workspacePath': '/repo/beta',
+          'workspaceIdentity': 'beta',
+          'label': 'beta',
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 's1',
+          'title': '任务甲',
+          'workspacePath': '/repo/alpha',
+          'workspaceIdentity': 'alpha',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('任务甲'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byType(ChatPage), findsOneWidget);
+
+    await session.openWorkspace({
+      'workspacePath': '/repo/beta',
+      'workspaceIdentity': 'beta',
+      'label': 'beta',
+    });
+    await tester.pump();
+    expect(find.byType(ChatPage), findsNothing);
+  });
 }

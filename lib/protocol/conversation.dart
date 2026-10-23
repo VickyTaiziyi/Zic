@@ -1541,13 +1541,23 @@ class ConversationState extends ChangeNotifier {
 
   void _applySnapshot(Map<String, dynamic> snap, int toSeq) {
     final pending = _takePendingUsers();
+    final nextEpoch = snap['logEpoch'] as String?;
+    // A new log epoch invalidates row ids already paged in. The same epoch
+    // must keep them: a tail snapshot would otherwise wipe "load older"
+    // and the list jumps back to the newest rows.
+    final epochChanged =
+        logEpoch != null && nextEpoch != null && nextEpoch != logEpoch;
+    final older = epochChanged
+        ? const <Map<String, dynamic>>[]
+        : _rowsOlderThanIncoming(snap);
+    if (epochChanged) hasMore = null;
     snapshot = snap;
     if (_pendingPatch != null) {
       snapshot = {...snap, ..._pendingPatch!};
       _pendingPatch = null;
     }
     seq = toSeq;
-    logEpoch = snap['logEpoch'] as String?;
+    logEpoch = nextEpoch ?? logEpoch;
     final rowsObj = snap['rows'];
     if (rowsObj is Map) {
       final window = rowsObj['window'];
@@ -1566,13 +1576,52 @@ class ConversationState extends ChangeNotifier {
       firstRowId = rows.isNotEmpty
           ? (rows.first['rowId'] as num?)?.toInt()
           : null;
+      if (older.isNotEmpty) {
+        final seen = rows.map((r) => (r['rowId'] as num?)?.toInt()).toSet();
+        final fresh = <Map<String, dynamic>>[];
+        for (final row in older) {
+          final id = (row['rowId'] as num?)?.toInt();
+          if (id != null && seen.add(id)) fresh.add(row);
+        }
+        fresh.sort(
+          (a, b) => ((a['rowId'] as num?) ?? 0).compareTo(
+            (b['rowId'] as num?) ?? 0,
+          ),
+        );
+        if (fresh.isNotEmpty) {
+          rows = [...fresh, ...rows];
+          firstRowId = (fresh.first['rowId'] as num?)?.toInt();
+        }
+      }
     } else {
       rows = [];
       totalCount = 0;
       storeFirstRowId = null;
       firstRowId = null;
+      hasMore = null;
     }
     _keepUnconfirmedPending(pending);
+  }
+
+  /// Rows the user already paged that sit strictly above the incoming
+  /// tail window. Local pending rows are reattached separately.
+  List<Map<String, dynamic>> _rowsOlderThanIncoming(
+    Map<String, dynamic> snap,
+  ) {
+    final rowsObj = snap['rows'];
+    if (rowsObj is! Map) return const [];
+    final window = rowsObj['window'];
+    if (window is! List || window.isEmpty || window.first is! Map) {
+      return const [];
+    }
+    final windowFirst = ((window.first as Map)['rowId'] as num?)?.toInt();
+    if (windowFirst == null) return const [];
+    return [
+      for (final row in rows)
+        if (row['local'] != true)
+          if (((row['rowId'] as num?)?.toInt() ?? windowFirst) < windowFirst)
+            row,
+    ];
   }
 
   /// Rows this phone painted before the server frame arrived.
