@@ -79,6 +79,11 @@ class _ChatPageState extends State<ChatPage> {
   String? _sessionId;
   String? _error;
   bool _sending = false;
+
+  /// Bumped when a newer send or dispose should abandon an in-flight
+  /// catch-up. A stale pull must not subscribe over the next turn.
+  int _catchUpGen = 0;
+  Timer? _catchUpTimer;
   bool _loadingOlder = false;
   bool _showSlash = false;
 
@@ -238,6 +243,8 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   void dispose() {
+    _catchUpGen++;
+    _catchUpTimer?.cancel();
     // mobile-view-state back to workspace-only (the phone left this task).
     try {
       widget.gateway.sendViewState();
@@ -416,6 +423,7 @@ class _ChatPageState extends State<ChatPage> {
     if (sessionId == null) return;
     if (_subscribing) return;
     _subscribing = true;
+    final epochAtStart = widget.gateway.linkEpoch;
     try {
       // Open-then-load: the workspace bridge may still be coming up in the
       // background (tap-opens-immediately flow) — retry instead of surfacing
@@ -458,7 +466,11 @@ class _ChatPageState extends State<ChatPage> {
               await _loadOlder();
             }
           }
-          _seenEpoch = widget.gateway.linkEpoch;
+          // Record the epoch this handle was actually opened against. A
+          // link swap that lands while subscribe is still in flight must
+          // still be followed; stamping the newer epoch here left the page
+          // on the disposed subscription until the user left and came back.
+          _seenEpoch = epochAtStart;
           // Explicitly position at the newest message: the state listener
           // only fires on LATER updates and misses the initial snapshot.
           _scrollToBottom();
@@ -474,6 +486,11 @@ class _ChatPageState extends State<ChatPage> {
       if (mounted && lastError != null) setState(() => _error = '$lastError');
     } finally {
       _subscribing = false;
+      if (mounted &&
+          _sessionId != null &&
+          widget.gateway.linkEpoch != _seenEpoch) {
+        _scheduleFollow(Duration.zero);
+      }
     }
   }
 
@@ -496,8 +513,15 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _followSubscription() async {
     final sessionId = _sessionId;
-    if (!mounted || _subscribing || sessionId == null) return;
-    if (_handle == null) return; // the initial _subscribe owns first attach
+    if (!mounted || sessionId == null) return;
+    // Subscribe still owns the first attach, including the history load.
+    // Dropping the follow here used to mark the new link as seen while the
+    // page kept the disposed handle, so sends never painted.
+    if (_subscribing) {
+      _scheduleFollow(const Duration(milliseconds: 200));
+      return;
+    }
+    if (_handle == null) return;
     if (widget.gateway.linkEpoch == _seenEpoch) return;
     try {
       final handle = await widget.gateway
@@ -794,6 +818,7 @@ class _ChatPageState extends State<ChatPage> {
         attachments = await _uploadPending(sessionId);
         setState(() => _progress = null);
       }
+      if (text.isNotEmpty) _state?.showPendingUser(text);
       final res = await widget.gateway.sendText(
         sessionId,
         text,
@@ -801,6 +826,7 @@ class _ChatPageState extends State<ChatPage> {
         heldQueueDisposition: heldDisposition,
       );
       if (_ackRejected(res)) {
+        if (text.isNotEmpty) _state?.dropPendingUser(text);
         if (mounted) {
           _toast(trP(context, 'chat.send.failed', [_ackReason(res)]));
         }
@@ -808,8 +834,12 @@ class _ChatPageState extends State<ChatPage> {
       }
       _inputController.clear();
       setState(() => _pendingFiles.clear());
-      if (text.isNotEmpty) unawaited(_recordInputHistory(text));
+      if (text.isNotEmpty) {
+        unawaited(_recordInputHistory(text));
+        unawaited(_awaitReply(sessionId, text));
+      }
     } catch (e) {
+      if (text.isNotEmpty) _state?.dropPendingUser(text);
       if (mounted) _toast(trP(context, 'chat.send.failed', ['$e']));
     } finally {
       if (mounted) {
@@ -832,6 +862,98 @@ class _ChatPageState extends State<ChatPage> {
   String _ackReason(dynamic res) {
     if (res is! Map) return '$res';
     return '${res['reasonCode'] ?? res['message'] ?? res['status']}';
+  }
+
+  bool _catchUpCurrent(int gen, String sessionId) =>
+      mounted && gen == _catchUpGen && _sessionId == sessionId;
+
+  /// The server copy of [text] is on screen, and a later non-user row
+  /// (the reply) is too.
+  bool _replyVisible(String text) {
+    final rows = _state?.rows ?? const <Map<String, dynamic>>[];
+    var userAt = -1;
+    for (var i = rows.length - 1; i >= 0; i--) {
+      final row = rows[i];
+      if (row['local'] == true) continue;
+      if (row['kind'] == 'userInput' && row['text'] == text) {
+        userAt = i;
+        break;
+      }
+    }
+    if (userAt < 0) return false;
+    for (var i = userAt + 1; i < rows.length; i++) {
+      final row = rows[i];
+      if (row['local'] == true) continue;
+      if (row['kind'] != 'userInput') return true;
+    }
+    return false;
+  }
+
+  /// The send is already on the desktop. A live subscription paints the
+  /// reply by itself. A silent one gets the snapshot that used to appear
+  /// only after the user left and came back.
+  Future<void> _awaitReply(String sessionId, String text) async {
+    final gen = ++_catchUpGen;
+    var baseline = _state?.seq ?? 0;
+    for (var i = 0; i < 12; i++) {
+      await _catchUpDelay(
+        i == 0
+            ? const Duration(milliseconds: 800)
+            : const Duration(seconds: 4),
+      );
+      if (!_catchUpCurrent(gen, sessionId) || _replyVisible(text)) return;
+      final seq = _state?.seq ?? 0;
+      if (seq != baseline) return;
+      await _pullSnapshot(sessionId);
+      if (!_catchUpCurrent(gen, sessionId) || _replyVisible(text)) return;
+      final moved = await _waitForSeq(gen, sessionId, baseline);
+      if (!_catchUpCurrent(gen, sessionId) || _replyVisible(text)) return;
+      if (moved) baseline = _state?.seq ?? baseline;
+    }
+  }
+
+  /// One outstanding catch-up wait. Dispose and a newer send cancel it,
+  /// so leaving the page does not leave a timer running.
+  Future<void> _catchUpDelay(Duration delay) {
+    final done = Completer<void>();
+    _catchUpTimer?.cancel();
+    _catchUpTimer = Timer(delay, () {
+      if (!done.isCompleted) done.complete();
+    });
+    return done.future;
+  }
+
+  /// True when [baseline] is no longer the subscription seq. A reload's
+  /// snapshot arrives as a later frame, so the caller waits before it
+  /// treats the next quiet window as another miss.
+  Future<bool> _waitForSeq(int gen, String sessionId, int baseline) async {
+    for (var i = 0; i < 10; i++) {
+      if ((_state?.seq ?? 0) != baseline) return true;
+      await _catchUpDelay(const Duration(milliseconds: 100));
+      if (!_catchUpCurrent(gen, sessionId)) return false;
+    }
+    return (_state?.seq ?? 0) != baseline;
+  }
+
+  Future<void> _pullSnapshot(String sessionId) async {
+    final reload = _handle?.reload;
+    if (reload != null) {
+      await reload();
+      return;
+    }
+    await _resubscribeInPlace(sessionId);
+  }
+
+  /// Closes the stranded handle and subscribes again. Used when the
+  /// gateway cannot reload the subscription the page already holds.
+  Future<void> _resubscribeInPlace(String sessionId) async {
+    if (_subscribing || !mounted || _sessionId != sessionId) return;
+    final old = _handle;
+    old?.state.removeListener(_scrollToBottom);
+    await old?.close();
+    if (!mounted || _sessionId != sessionId) return;
+    if (identical(_handle, old)) _handle = null;
+    await _subscribe();
   }
 
   String _requireSession() {

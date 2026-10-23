@@ -61,6 +61,30 @@ class ConversationTransport {
 
   void _log(String line) => onLog?.call(line);
 
+  Future<void> _initializeHello() async {
+    final base = <String, dynamic>{
+      'kind': 'clientHello',
+      'protocolVersion': 3,
+      'clientId': clientId,
+      'clientKind': 'mobileApp',
+      'appVersion': appVersion,
+    };
+    try {
+      await _channels.call(channel, 'initializeConversationV4', [
+        {
+          ...base,
+          'capabilities': {
+            'workflowRunDeltas': true,
+            'historyFirst': true,
+          },
+        },
+      ]);
+    } catch (e) {
+      _log('[v4] clientHello capabilities declined ($e); retrying');
+      await _channels.call(channel, 'initializeConversationV4', [base]);
+    }
+  }
+
   Future<void> handshake() {
     if (_handshaken) return Future.value();
     return _handshakeFuture ??=
@@ -74,15 +98,11 @@ class ConversationTransport {
           if (hello is Map) {
             connectionId = hello['connectionId'] as String?;
           }
-          await _channels.call(channel, 'initializeConversationV4', [
-            {
-              'kind': 'clientHello',
-              'protocolVersion': 3,
-              'clientId': clientId,
-              'clientKind': 'mobileApp',
-              'appVersion': appVersion,
-            },
-          ]);
+          // The desktop copies these onto conversationSubscribe. The web
+          // client sends both. Without them the open subscription gets one
+          // snapshot and later turns stay invisible until the next subscribe.
+          // An older desktop that rejects the keys is retried without them.
+          await _initializeHello();
           _handshaken = true;
         }().catchError((e) {
           _handshakeFuture = null;
@@ -1155,6 +1175,10 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
     state.applyFrame(frame, onGap: _resync);
   }
 
+  /// Asks the desktop for a fresh snapshot on this same subscription.
+  /// The open page keeps its handle; the frame lands on [state].
+  Future<void> reload() => _resync();
+
   void _startWatchdog() {
     _watchdog?.cancel();
     _watchdog = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -1516,6 +1540,7 @@ class ConversationState extends ChangeNotifier {
   }
 
   void _applySnapshot(Map<String, dynamic> snap, int toSeq) {
+    final pending = _takePendingUsers();
     snapshot = snap;
     if (_pendingPatch != null) {
       snapshot = {...snap, ..._pendingPatch!};
@@ -1547,12 +1572,66 @@ class ConversationState extends ChangeNotifier {
       storeFirstRowId = null;
       firstRowId = null;
     }
+    _keepUnconfirmedPending(pending);
+  }
+
+  /// Rows this phone painted before the server frame arrived.
+  List<Map<String, dynamic>> _takePendingUsers() =>
+      rows.where((r) => r['local'] == true).toList();
+
+  void _dropPendingUser(String? text) {
+    final before = rows.length;
+    rows.removeWhere(
+      (r) => r['local'] == true && (text == null || r['text'] == text),
+    );
+    final removed = before - rows.length;
+    if (removed > 0) {
+      totalCount = (totalCount - removed).clamp(0, 1 << 31);
+    }
+  }
+
+  void _keepUnconfirmedPending(List<Map<String, dynamic>> pending) {
+    for (final row in pending) {
+      final text = row['text'];
+      final confirmed = rows.any(
+        (r) =>
+            r['local'] != true && r['kind'] == 'userInput' && r['text'] == text,
+      );
+      if (confirmed) continue;
+      rows.add(row);
+      totalCount += 1;
+    }
+  }
+
+  /// Shows [text] on the open conversation immediately. The matching server
+  /// row replaces it. A later snapshot drops it once the server copy exists.
+  void showPendingUser(String text) {
+    if (text.isEmpty) return;
+    rows.add({
+      'rowId': -DateTime.now().microsecondsSinceEpoch,
+      'kind': 'userInput',
+      'text': text,
+      'state': 'done',
+      'local': true,
+    });
+    totalCount += 1;
+    firstRowId ??= (rows.first['rowId'] as num?)?.toInt();
+    notifyListeners();
+  }
+
+  void dropPendingUser(String text) {
+    final before = rows.length;
+    _dropPendingUser(text);
+    if (rows.length != before) notifyListeners();
   }
 
   void _applyDelta(Map<String, dynamic> delta) {
     switch (delta['op']) {
       case 'row.appended':
         final row = (delta['row'] as Map).cast<String, dynamic>();
+        if (row['kind'] == 'userInput') {
+          _dropPendingUser(row['text'] as String?);
+        }
         rows.add(row);
         totalCount += 1;
         firstRowId ??= (row['rowId'] as num?)?.toInt();

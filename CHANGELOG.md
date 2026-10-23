@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.18+19 — 2026-10-23
+
+- Sending a message shows that message on the open conversation. The reply
+  shows there too, without leaving the task and opening it again.
+
 ## 1.0.17+18 — 2026-10-23
 
 - A reply stays on the open task. Sending a message no longer marks the

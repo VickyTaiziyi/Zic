@@ -39,6 +39,14 @@ class FakeChatGateway extends ChangeNotifier implements ChatGateway {
   /// land AFTER the page rendered its not-ready spinner.
   Completer<ChatHandle>? subscribeGate;
 
+  int subscribeCalls = 0;
+
+  /// Applied on the second and later subscribe, then cleared.
+  List<Map<String, dynamic>>? feedOnSubscribe;
+
+  /// When set, handles expose it as [ChatHandle.reload].
+  Future<void> Function()? onReload;
+
   /// Extra snapshot fields merged into every feed (queue, interactions...).
   Map<String, dynamic> snapshotExtra = const {};
 
@@ -66,18 +74,29 @@ class FakeChatGateway extends ChangeNotifier implements ChatGateway {
     }, onGap: () => fail('unexpected gap'));
   }
 
+  ChatHandle _handleFor(ConversationState state) => ChatHandle(
+    state: state,
+    close: () async {},
+    reload: onReload == null ? null : () => onReload!.call(),
+  );
+
   @override
   Future<ChatHandle> subscribe(String sessionId) async {
     final fail = failSubscribeWith;
     if (fail != null) throw fail('subscribe');
-    final handle = ChatHandle(state: state, close: () async {});
+    subscribeCalls++;
+    final handle = _handleFor(state);
     final gate = subscribeGate;
     if (gate != null) await gate.future;
     // Read `state` again after the gate: a swap while gated must hand out
     // the NEW subscription, like the session-level heal does.
-    return identical(handle.state, state)
-        ? handle
-        : ChatHandle(state: state, close: () async {});
+    final current = identical(handle.state, state) ? handle : _handleFor(state);
+    final feed = feedOnSubscribe;
+    if (feed != null && subscribeCalls > 1) {
+      feedOnSubscribe = null;
+      feedSnapshot(feed);
+    }
+    return current;
   }
 
   dynamic _rec(String method, [List<Object?> args = const []]) {
@@ -1346,6 +1365,80 @@ void main() {
 
     final call = gateway.calls.where((c) => c.$1 == 'sendText').toList().single;
     expect(call.$2, ['s1', '继续', null]);
+    expect(find.text('继续'), findsOneWidget);
+  });
+
+  testWidgets('a reply frame paints on the open conversation', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    final subscribes = gateway.subscribeCalls;
+
+    await tester.enterText(find.byType(TextField), '继续');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    expect(find.text('继续'), findsOneWidget);
+
+    gateway.state.applyFrame({
+      'fromSeq': gateway.state.seq,
+      'toSeq': gateway.state.seq + 1,
+      'payload': {
+        'kind': 'deltas',
+        'deltas': [
+          {
+            'op': 'row.appended',
+            'row': {'rowId': 2, 'kind': 'userInput', 'text': '继续'},
+          },
+          {
+            'op': 'row.appended',
+            'row': {'rowId': 3, 'kind': 'assistantText', 'text': '这是回复'},
+          },
+        ],
+      },
+    }, onGap: () => fail('gap'));
+    await tester.pump();
+    expect(find.text('这是回复'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 900));
+    expect(gateway.subscribeCalls, subscribes);
+  });
+
+  testWidgets('a silent subscription reloads the reply in place', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway();
+    gateway.onReload = () async {
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+        {'rowId': 2, 'kind': 'userInput', 'text': '继续'},
+        {'rowId': 3, 'kind': 'assistantText', 'text': '后来的回复'},
+      ]);
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    final subscribes = gateway.subscribeCalls;
+
+    await tester.enterText(find.byType(TextField), '继续');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    expect(find.text('后来的回复'), findsNothing);
+
+    await tester.pump(const Duration(milliseconds: 900));
+    await tester.pump();
+    expect(find.text('后来的回复'), findsOneWidget);
+    expect(gateway.subscribeCalls, subscribes);
   });
 
   testWidgets('kicked gateway shows the takeover overlay', (tester) async {

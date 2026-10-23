@@ -43,6 +43,51 @@ void main() {
       expect(state.ready, isTrue);
     });
 
+    test('pending user stays until the server row arrives', () {
+      _injectSnapshot(state, seq: 3, rows: [
+        {'rowId': 1, 'kind': 'assistantText', 'text': 'old'},
+      ], totalCount: 1);
+      state.showPendingUser('hello');
+      expect(state.rows.last['local'], isTrue);
+      expect(state.rows.last['text'], 'hello');
+
+      state.applyFrame({
+        'fromSeq': 3,
+        'toSeq': 4,
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'row.appended',
+              'row': {'rowId': 2, 'kind': 'userInput', 'text': 'hello'},
+            },
+          ],
+        },
+      }, onGap: () => fail('should not gap'));
+
+      expect(state.rows.where((r) => r['local'] == true), isEmpty);
+      expect(state.rows.last['rowId'], 2);
+      expect(state.rows.last['text'], 'hello');
+    });
+
+    test('snapshot keeps a pending user the server has not stored', () {
+      state.showPendingUser('hello');
+      _injectSnapshot(state, seq: 4, rows: [
+        {'rowId': 1, 'kind': 'assistantText', 'text': 'old'},
+      ], totalCount: 1);
+      expect(state.rows.last['local'], isTrue);
+      expect(state.rows.last['text'], 'hello');
+    });
+
+    test('snapshot drops a pending user once the server copy is present', () {
+      state.showPendingUser('hello');
+      _injectSnapshot(state, seq: 5, rows: [
+        {'rowId': 2, 'kind': 'userInput', 'text': 'hello'},
+      ], totalCount: 1);
+      expect(state.rows.where((r) => r['local'] == true), isEmpty);
+      expect(state.rows, hasLength(1));
+    });
+
     test('row.appended adds to end', () {
       _injectSnapshot(state, seq: 1);
       state.applyFrame({

@@ -156,7 +156,15 @@ class ChatHandle {
   final ConversationState state;
   final Future<void> Function() close;
 
-  const ChatHandle({required this.state, required this.close});
+  /// Pulls a fresh snapshot onto [state] without replacing the handle.
+  /// Null when the gateway has no live subscription to reload.
+  final Future<void> Function()? reload;
+
+  const ChatHandle({
+    required this.state,
+    required this.close,
+    this.reload,
+  });
 }
 
 /// The Conversation V4 surface the native chat page drives — the
@@ -1521,6 +1529,7 @@ class DeviceSession extends ChangeNotifier
     _chatSubRefs[sessionId] = (_chatSubRefs[sessionId] ?? 0) + 1;
     return ChatHandle(
       state: sub.state,
+      reload: sub.reload,
       close: () async {
         final left = (_chatSubRefs[sessionId] ?? 1) - 1;
         if (left > 0) {
