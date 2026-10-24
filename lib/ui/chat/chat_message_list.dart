@@ -150,6 +150,13 @@ List<List<Map<String, dynamic>>> groupTurnRows(
       groups.add([row]);
       continue;
     }
+    // Keep the local "正在思考" card in the message's own turn. A second list
+    // item inserted in that same frame leaves a sliver child unlaid-out,
+    // and semantics then asserts.
+    if (row['pendingThinking'] == true && current != null) {
+      current.add(row);
+      continue;
+    }
     final isUser = kind == 'userInput';
     final startsGroup =
         isUser || current == null || current.first['kind'] == 'userInput';
@@ -495,10 +502,12 @@ class _RowWidget extends StatelessWidget {
           state: state,
           showFeedback: showFeedback,
         ),
-      'reasoning' => ReasoningTile(
-          text: row['text'] as String? ?? '',
-          streaming: row['state'] == 'streaming',
-        ),
+      'reasoning' => row['pendingThinking'] == true
+          ? const PendingThinkingCard()
+          : ReasoningTile(
+              text: row['text'] as String? ?? '',
+              streaming: row['state'] == 'streaming',
+            ),
       'toolCall' => ToolCallTile(
           row: row,
           state: state,

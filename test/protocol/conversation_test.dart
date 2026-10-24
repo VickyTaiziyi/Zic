@@ -85,6 +85,66 @@ void main() {
       expect(state.rows.last['text'], 'hello');
     });
 
+    test('pending thinking stays until a reply row arrives', () {
+      _injectSnapshot(state, seq: 3, rows: [
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hello'},
+      ], totalCount: 1);
+      state.showPendingThinking();
+      expect(state.rows.last['pendingThinking'], isTrue);
+
+      _injectSnapshot(state, seq: 4, rows: [
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hello'},
+      ], totalCount: 1);
+      expect(state.rows.last['pendingThinking'], isTrue);
+
+      state.applyFrame({
+        'fromSeq': 4,
+        'toSeq': 5,
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'row.appended',
+              'row': {
+                'rowId': 2,
+                'kind': 'reasoning',
+                'text': '想一下',
+                'state': 'streaming',
+              },
+            },
+          ],
+        },
+      }, onGap: () => fail('should not gap'));
+
+      expect(state.rows.where((r) => r['pendingThinking'] == true), isEmpty);
+      expect(state.rows.last['text'], '想一下');
+    });
+
+    test('a finished turn drops pending thinking', () {
+      _injectSnapshot(state, seq: 2, rows: [
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hello'},
+      ], snapshot: {
+        'control': {'phase': 'running'},
+      });
+      state.showPendingThinking();
+      state.applyFrame({
+        'fromSeq': 2,
+        'toSeq': 3,
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'state.updated',
+              'patch': {
+                'control': {'phase': 'idle'},
+              },
+            },
+          ],
+        },
+      }, onGap: () => fail('should not gap'));
+      expect(state.rows.where((r) => r['pendingThinking'] == true), isEmpty);
+    });
+
     test('snapshot drops a pending user once the server copy is present', () {
       state.showPendingUser('hello');
       _injectSnapshot(state,

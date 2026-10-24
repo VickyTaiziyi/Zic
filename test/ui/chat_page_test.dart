@@ -1372,6 +1372,8 @@ void main() {
     final call = gateway.calls.where((c) => c.$1 == 'sendText').toList().single;
     expect(call.$2, ['s1', '继续', null]);
     expect(find.text('继续'), findsOneWidget);
+    expect(find.text('正在思考'), findsOneWidget);
+    expect(find.textContaining('消息已收到'), findsOneWidget);
   });
 
   testWidgets('a reply frame paints on the open conversation', (tester) async {

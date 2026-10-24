@@ -129,6 +129,23 @@ class ChannelRpcError implements Exception {
   String toString() => 'ChannelRpcError: $message';
 }
 
+/// Desktop message only. The exception type name is not for the screen.
+String channelErrorMessage(Object error) {
+  if (error is ChannelRpcError) return error.message;
+  final text = error.toString();
+  const prefix = 'ChannelRpcError: ';
+  if (text.startsWith(prefix)) return text.substring(prefix.length);
+  return text;
+}
+
+/// The workspace bridge answers this when that channel is not registered
+/// yet. The desktop gives the request about one second, then fails it.
+bool channelNotReady(Object error) {
+  final message = channelErrorMessage(error);
+  return message.contains('Unknown channel') ||
+      message.contains('timed out after');
+}
+
 /// Well-known channel names (`Wb` enum in the web client).
 class Channels {
   static const file = 'file';
@@ -147,6 +164,10 @@ class Channels {
   static const fileWatcher = 'file-watcher';
   static const oauth = 'oauth';
   static const modelProvider = 'model-provider';
+
+  /// Current provider settings facade on the mobile workspace bridge.
+  /// `model-provider` is not registered there, so getAll times out.
+  static const providerSettings = 'provider-settings';
   static const usageStats = 'usage-stats';
   static const codingPlanSubscription = 'coding-plan-subscription';
   static const skills = 'skills';

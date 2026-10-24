@@ -345,6 +345,8 @@ const _zh = {
   'chat.held.clear': '立即发送',
   'chat.reasoning': '思考过程',
   'chat.reasoning.thinking': '思考中…',
+  'chat.reasoning.pending.title': '正在思考',
+  'chat.reasoning.pending.body': '消息已收到。思考过程和回答会在开始输出后显示在这里。',
   'chat.turn.worked': '已工作 \$0',
   'chat.time.secOnly': '\$0 秒',
   'chat.time.minSec': '\$0 分 \$1 秒',
@@ -757,6 +759,7 @@ const _zh = {
   'providers.modelsCount': '\$0 个模型',
   'providers.disabled': '停用: \$0',
   'providers.loadFailed': '加载失败: \$0',
+  'providers.loadFailed.plain': '模型列表没有加载出来。请稍后再刷新。',
   'providers.toggleFailed': '切换失败: \$0',
   'providers.deleteFailed': '删除失败: \$0',
   'providers.addFailed': '添加失败: \$0',
@@ -952,6 +955,9 @@ const _zh = {
   // ---- Off-peak functional alignment (official desktop dictionary) ----
   'op.tab.settings': '设置',
   'op.tab.history': '历史',
+  'op.tab.scheduled': '定时任务',
+  'op.scheduled.hint': '这里是这台电脑上已经设好的定时任务，可以查看、开关和编辑。',
+  'op.scheduled.unavailable': '连上这台电脑后，可以在这里查看已有的定时任务。',
   'op.history.empty': '还没有历史记录。',
   'op.history.delete': '删除历史记录',
   'op.badge.paused': '#\$0 已暂停',
@@ -1224,6 +1230,9 @@ const _en = {
   'chat.held.clear': 'Send now',
   'chat.reasoning': 'Reasoning',
   'chat.reasoning.thinking': 'Thinking…',
+  'chat.reasoning.pending.title': 'Thinking',
+  'chat.reasoning.pending.body':
+      'Message received. Reasoning and the reply appear here once output starts.',
   'chat.turn.worked': 'Worked \$0',
   'chat.time.secOnly': '\$0s',
   'chat.time.minSec': '\$0m \$1s',
@@ -1657,6 +1666,8 @@ const _en = {
   'providers.modelsCount': '\$0 models',
   'providers.disabled': 'Disabled: \$0',
   'providers.loadFailed': 'Load failed: \$0',
+  'providers.loadFailed.plain':
+      'The model list did not load. Refresh in a moment.',
   'providers.toggleFailed': 'Toggle failed: \$0',
   'providers.deleteFailed': 'Delete failed: \$0',
   'providers.addFailed': 'Add failed: \$0',
@@ -1868,6 +1879,11 @@ const _en = {
   // ---- Off-peak functional alignment (official desktop dictionary) ----
   'op.tab.settings': 'Settings',
   'op.tab.history': 'History',
+  'op.tab.scheduled': 'Scheduled',
+  'op.scheduled.hint':
+      'Scheduled tasks already on this computer are listed here. You can view, enable, or edit them.',
+  'op.scheduled.unavailable':
+      'Connect this computer to see its scheduled tasks.',
   'op.history.empty': 'No history yet.',
   'op.history.delete': 'Delete history',
   'op.badge.paused': '#\$0 Paused',

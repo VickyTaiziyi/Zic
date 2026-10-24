@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../protocol/channel_client.dart';
-import '../protocol/id.dart';
+import '../protocol/provider_settings.dart';
 import '../state/device_session.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 import 'widgets/dropdown_field.dart';
 
-/// Model provider management of one device (model-provider channel:
-/// getAll/save/delete), restyled with the Zic tokens.
+/// Model provider management of one device (`provider-settings` getView /
+/// personal overlay), restyled with the Zic tokens.
 class ModelProvidersPage extends StatefulWidget {
   final DeviceSession session;
   const ModelProvidersPage({super.key, required this.session});
@@ -22,8 +22,7 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
   bool _loading = true;
   String? _error;
 
-  /// Web parity: `model-provider.onDidChangeProviderRegistry` pushes
-  /// registry revisions — reload the list whenever the desktop changes it.
+  /// `provider-settings.onDidChange` pushes a new view. Reload when it does.
   void Function()? _cancelRegistryListener;
 
   @override
@@ -37,8 +36,8 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
     final bridge = widget.session.bridge;
     if (bridge == null) return;
     _cancelRegistryListener = bridge.channels.addEventListener(
-      Channels.modelProvider,
-      'onDidChangeProviderRegistry',
+      Channels.providerSettings,
+      'onDidChange',
       (_) => _load(),
     );
   }
@@ -56,45 +55,55 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
       _error = null;
     });
     try {
-      final res =
-          await widget.session.callChannel('model-provider', 'getAll');
-      if (mounted) {
-        setState(() {
-          _providers = res is List
-              ? res
-                  .whereType<Map>()
-                  .map((e) => e.cast<String, dynamic>())
-                  .toList()
-              : const [];
-          _loading = false;
-        });
-      }
+      final res = await _fetchView();
+      if (!mounted) return;
+      setState(() {
+        _providers = parseProviderSettingsView(res);
+        _loading = false;
+      });
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = '$e';
-          _loading = false;
-        });
-      }
+      if (!mounted) return;
+      debugPrint('[providers] load failed: $e');
+      setState(() {
+        _error = _failureText(e, 'providers.loadFailed');
+        _loading = false;
+      });
     }
   }
 
-  Future<void> _save(Map<String, dynamic> provider) async {
-    await widget.session.callChannel('model-provider', 'save', [
-      {
-        ...provider,
-        'updatedAt': DateTime.now().millisecondsSinceEpoch,
-      },
-    ]);
+  /// `getView` on the channel the mobile bridge actually registers.
+  /// A channel that is still coming up fails in about a second; retry once.
+  Future<dynamic> _fetchView() async {
+    try {
+      return await widget.session
+          .callChannel(Channels.providerSettings, 'getView');
+    } catch (e) {
+      if (!channelNotReady(e)) rethrow;
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      return widget.session.callChannel(Channels.providerSettings, 'getView');
+    }
+  }
+
+  String _failureText(Object error, String detailKey) {
+    if (channelNotReady(error)) return tr(context, 'providers.loadFailed.plain');
+    return trP(context, detailKey, [channelErrorMessage(error)]);
   }
 
   Future<void> _toggle(Map<String, dynamic> provider, bool enabled) async {
     try {
-      await _save({...provider, 'enabled': enabled});
+      await widget.session.callChannel(
+        Channels.providerSettings,
+        'savePersonalProviderOverlay',
+        [
+          '${provider['id']}',
+          personalProviderOverlay(provider),
+          {'enabled': enabled},
+        ],
+      );
       await _load();
     } catch (e) {
       if (!mounted) return;
-      _toast(trP(context, 'providers.toggleFailed', ['$e']));
+      _toast(_failureText(e, 'providers.toggleFailed'));
     }
   }
 
@@ -121,23 +130,14 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
     );
     if (confirmed != true) return;
     try {
-      await widget.session
-          .callChannel('model-provider', 'delete', [
-        {'id': provider['id']}
-      ]);
-    } on ChannelRpcError {
-      // Fallback: try alternate parameter shape.
-      try {
-        await widget.session
-            .callChannel('model-provider', 'delete', ['${provider['id']}']);
-      } catch (e2) {
-        if (!mounted) return;
-        _toast(trP(context, 'providers.deleteFailed', ['$e2']));
-        return;
-      }
+      await widget.session.callChannel(
+        Channels.providerSettings,
+        'deletePersonalProvider',
+        ['${provider['id']}'],
+      );
     } catch (e) {
       if (!mounted) return;
-      _toast(trP(context, 'providers.deleteFailed', ['$e']));
+      _toast(_failureText(e, 'providers.deleteFailed'));
       return;
     }
     await _load();
@@ -154,17 +154,45 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
     final added = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
-      builder: (context) => _AddProviderSheet(session: widget.session),
+      builder: (context) => const _AddProviderSheet(),
     );
     if (added == null) return;
+    final modelIds = [
+      for (final id in (added['modelIds'] as List? ?? const [])) '$id',
+    ].where((id) => id.isNotEmpty).toList();
+    final draft = Map<String, dynamic>.from(added)..remove('modelIds');
     try {
-      await _save(added);
+      final created = await widget.session.callChannel(
+        Channels.providerSettings,
+        'createPersonalProvider',
+        [draft],
+      );
+      final providerId =
+          created is Map ? '${created['providerId'] ?? ''}' : '';
+      Object? modelError;
+      if (providerId.isNotEmpty) {
+        for (final modelId in modelIds) {
+          try {
+            await widget.session.callChannel(
+              Channels.providerSettings,
+              'addPersonalModel',
+              [providerId, modelId, <String, dynamic>{}, true],
+            );
+          } catch (e) {
+            modelError ??= e;
+          }
+        }
+      }
       await _load();
       if (!mounted) return;
-      _toast(tr(context, 'providers.added'));
+      if (modelError != null) {
+        _toast(_failureText(modelError, 'providers.addFailed'));
+      } else {
+        _toast(tr(context, 'providers.added'));
+      }
     } catch (e) {
       if (!mounted) return;
-      _toast(trP(context, 'providers.addFailed', ['$e']));
+      _toast(_failureText(e, 'providers.addFailed'));
     }
   }
 
@@ -186,7 +214,11 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
           ? const Center(child: CircularProgressIndicator())
           : _error != null
               ? Center(
-                  child: Text(trP(context, 'providers.loadFailed', [_error!])))
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 32),
+                    child: Text(_error!, textAlign: TextAlign.center),
+                  ),
+                )
               : RefreshIndicator(
                   onRefresh: _load,
                   child: ListView.separated(
@@ -266,8 +298,7 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
 }
 
 class _AddProviderSheet extends StatefulWidget {
-  final DeviceSession session;
-  const _AddProviderSheet({required this.session});
+  const _AddProviderSheet();
 
   @override
   State<_AddProviderSheet> createState() => _AddProviderSheetState();
@@ -279,60 +310,12 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
   final _apiKeyController = TextEditingController();
   final _modelsController = TextEditingController();
   String _apiFormat = 'anthropic-messages';
-  List<String> _suggestions = const [];
-  bool _fetchingModels = false;
 
   static const _formats = [
     'anthropic-messages',
-    'openai-chat',
-    'gemini',
+    'openai-chat-completions',
+    'openai-responses',
   ];
-
-  /// Web parity: `model-provider.getEndpointSuggestions` (preset endpoints)
-  /// and `getModelsByEndpoint` (fills the model list automatically).
-  Future<dynamic> _call(String method, List<Object?> args) =>
-      widget.session.callChannel('model-provider', method, args);
-
-  Future<void> _suggestEndpoints() async {
-    try {
-      final res = await _call('getEndpointSuggestions', []);
-      final list = res is Map ? res['suggestions'] : res;
-      if (mounted) {
-        setState(() => _suggestions = [
-              for (final s0 in (list as List? ?? const [])) '$s0',
-            ]);
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _suggestions = const []);
-      }
-    }
-  }
-
-  Future<void> _fetchModels(String endpoint) async {
-    setState(() => _fetchingModels = true);
-    try {
-      final res = await _call('getModelsByEndpoint', [endpoint]);
-      final ids = <String>[];
-      if (res is List) {
-        for (final m in res) {
-          ids.add(m is Map ? '${m['id'] ?? m['modelId'] ?? ''}' : '$m');
-        }
-      } else if (res is Map && res['models'] is List) {
-        for (final m in res['models'] as List) {
-          ids.add(m is Map ? '${m['id'] ?? m['modelId'] ?? ''}' : '$m');
-        }
-      }
-      if (mounted) {
-        setState(() {
-          _modelsController.text = ids.where((i) => i.isNotEmpty).join(', ');
-          _fetchingModels = false;
-        });
-      }
-    } catch (_) {
-      if (mounted) setState(() => _fetchingModels = false);
-    }
-  }
 
   @override
   void dispose() {
@@ -347,46 +330,23 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
     final name = _nameController.text.trim();
     final baseUrl = _baseUrlController.text.trim();
     if (name.isEmpty || baseUrl.isEmpty) return;
-    final now = DateTime.now().millisecondsSinceEpoch;
     final modelIds = _modelsController.text
         .split(RegExp(r'[,\n]'))
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList();
-    final kind = _apiFormat.startsWith('anthropic')
-        ? 'anthropic'
-        : _apiFormat.startsWith('openai')
-            ? 'openai'
-            : 'gemini';
-    Navigator.pop(context, {
-      'id': 'custom:${generateUuid()}',
-      'name': name,
-      'enabled': true,
-      'endpoints': {
-        'baseURL': baseUrl,
-        'paths': {kind: '/v1/messages'},
+    Navigator.pop(
+      context,
+      {
+        ...personalProviderDraft(
+          name: name,
+          apiType: _apiFormat,
+          baseUrl: baseUrl,
+          apiKey: _apiKeyController.text.trim(),
+        ),
+        'modelIds': modelIds,
       },
-      'apiFormat': _apiFormat,
-      'source': 'custom',
-      if (_apiKeyController.text.trim().isNotEmpty)
-        'apiKey': _apiKeyController.text.trim(),
-      'defaultKind': kind,
-      'models': [
-        for (var i = 0; i < modelIds.length; i++)
-          {
-            'id': modelIds[i],
-            'kinds': [kind],
-            'defaultKind': kind,
-            'modalities': {
-              'input': ['text'],
-              'output': ['text'],
-            },
-            'priority': 100 + i,
-          },
-      ],
-      'createdAt': now,
-      'updatedAt': now,
-    });
+    );
   }
 
   @override
@@ -422,37 +382,11 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
           const SizedBox(height: 10),
           TextField(
             controller: _baseUrlController,
-            decoration: InputDecoration(
+            decoration: const InputDecoration(
               labelText: 'Base URL',
               hintText: 'https://api.example.com/api/anthropic',
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.auto_awesome, size: 18),
-                tooltip: tr(context, 'providers.suggest'),
-                onPressed: _suggestEndpoints,
-              ),
             ),
           ),
-          if (_suggestions.isNotEmpty)
-            SizedBox(
-              height: 38,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                children: [
-                  for (final s0 in _suggestions)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: ActionChip(
-                        label: Text(s0,
-                            style: const TextStyle(fontSize: 11)),
-                        onPressed: () {
-                          _baseUrlController.text = s0;
-                          _fetchModels(s0);
-                        },
-                      ),
-                    ),
-                ],
-              ),
-            ),
           const SizedBox(height: 10),
           TextField(
             controller: _apiKeyController,
@@ -467,16 +401,6 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
             decoration: InputDecoration(
               labelText: tr(context, 'providers.models'),
               hintText: 'GLM-5.2, GLM-5-Turbo',
-              suffixIcon: _fetchingModels
-                  ? const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: SizedBox(
-                          width: 16,
-                          height: 16,
-                          child:
-                              CircularProgressIndicator(strokeWidth: 2)),
-                    )
-                  : null,
             ),
           ),
           const SizedBox(height: 16),

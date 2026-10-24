@@ -1,7 +1,7 @@
 name: zic
 description: "Zic — a native, full-protocol remote for ZCode. Devices, tasks, conversations, workflows; all over the official relay."
 publish_to: "none"
-version: 1.0.20+21
+version: 1.0.21+22
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

@@ -1766,10 +1766,23 @@ class ConversationState extends ChangeNotifier {
   int totalCount = 0;
   bool ready = false;
 
+  /// Local optimistic rows use negative ids. A clock can repeat within one
+  /// millisecond and two rows would then share a turn key.
+  int _localRowSeq = 0;
+
+  int _nextLocalRowId() {
+    _localRowSeq += 1;
+    return -_localRowSeq;
+  }
+
   /// `hasMore` from the latest conversationRowsRangeV4 response — the web
   /// store pages on this flag. Null until the first load-older runs (older
   /// builds fall back to the totalCount heuristic).
   bool? hasMore;
+
+  /// True after the local thinking row has seen phase running/prewarming.
+  /// An idle phase before that is "not started yet", not "the turn ended".
+  bool _pendingThinkingSawRunning = false;
 
   void applyFrame(
     Map<String, dynamic> frame, {
@@ -1796,6 +1809,7 @@ class ConversationState extends ChangeNotifier {
       }
       seq = toSeq;
     }
+    _reconcilePendingThinking();
     ready = true;
     notifyListeners();
   }
@@ -1900,7 +1914,14 @@ class ConversationState extends ChangeNotifier {
   }
 
   void _keepUnconfirmedPending(List<Map<String, dynamic>> pending) {
+    final keepThinking = !_tailHasReply();
     for (final row in pending) {
+      if (row['pendingThinking'] == true) {
+        if (!keepThinking) continue;
+        rows.add(row);
+        totalCount += 1;
+        continue;
+      }
       final text = row['text'];
       final confirmed = rows.any(
         (r) =>
@@ -1917,7 +1938,7 @@ class ConversationState extends ChangeNotifier {
   void showPendingUser(String text) {
     if (text.isEmpty) return;
     rows.add({
-      'rowId': -DateTime.now().microsecondsSinceEpoch,
+      'rowId': _nextLocalRowId(),
       'kind': 'userInput',
       'text': text,
       'state': 'done',
@@ -1934,12 +1955,87 @@ class ConversationState extends ChangeNotifier {
     if (rows.length != before) notifyListeners();
   }
 
+  /// Local "正在思考" row. The real reasoning or reply row replaces it.
+  /// A turn that ends without one drops it too.
+  void showPendingThinking() {
+    if (_tailHasReply()) return;
+    if (rows.any((r) => r['pendingThinking'] == true)) return;
+    _pendingThinkingSawRunning = isRunning;
+    rows.add({
+      'rowId': _nextLocalRowId(),
+      'kind': 'reasoning',
+      'text': '',
+      'state': 'streaming',
+      'local': true,
+      'pendingThinking': true,
+    });
+    totalCount += 1;
+    firstRowId ??= (rows.first['rowId'] as num?)?.toInt();
+    notifyListeners();
+  }
+
+  void dropPendingThinking() {
+    final before = rows.length;
+    _removePendingThinking();
+    _pendingThinkingSawRunning = false;
+    if (rows.length != before) notifyListeners();
+  }
+
+  void _removePendingThinking() {
+    final before = rows.length;
+    rows.removeWhere((r) => r['pendingThinking'] == true);
+    final removed = before - rows.length;
+    if (removed > 0) {
+      totalCount = (totalCount - removed).clamp(0, 1 << 31);
+    }
+  }
+
+  /// A server reply already sits after the latest user row.
+  bool _tailHasReply() {
+    for (var i = rows.length - 1; i >= 0; i--) {
+      final row = rows[i];
+      if (row['pendingThinking'] == true) continue;
+      final kind = row['kind'];
+      if (kind == 'userInput') return false;
+      if (kind == 'reasoning' ||
+          kind == 'assistantText' ||
+          kind == 'toolCall') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _reconcilePendingThinking() {
+    final pending = rows.any((r) => r['pendingThinking'] == true);
+    if (!pending) {
+      _pendingThinkingSawRunning = false;
+      return;
+    }
+    if (_tailHasReply()) {
+      _removePendingThinking();
+      _pendingThinkingSawRunning = false;
+      return;
+    }
+    if (isRunning) _pendingThinkingSawRunning = true;
+    if (_pendingThinkingSawRunning && !isRunning) {
+      _removePendingThinking();
+      _pendingThinkingSawRunning = false;
+    }
+  }
+
+  bool _replacesPendingThinking(String? kind) =>
+      kind == 'reasoning' || kind == 'assistantText' || kind == 'toolCall';
+
   void _applyDelta(Map<String, dynamic> delta) {
     switch (delta['op']) {
       case 'row.appended':
         final row = (delta['row'] as Map).cast<String, dynamic>();
         if (row['kind'] == 'userInput') {
           _dropPendingUser(row['text'] as String?);
+        }
+        if (_replacesPendingThinking(row['kind'] as String?)) {
+          _removePendingThinking();
         }
         rows.add(row);
         totalCount += 1;

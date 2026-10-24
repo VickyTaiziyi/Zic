@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.21+22 — 2026-10-24
+
+- Model settings load the provider list from the desktop. When that list
+  is not ready, the page says so instead of showing a raw channel error.
+- The off-peak page lists scheduled tasks already set on this computer.
+  You can view, enable, and edit them.
+- After a message is accepted, the conversation shows that it is thinking.
+  The desktop's reasoning replaces that note once output starts.
+
 ## 1.0.20+21 — 2026-10-24
 
 - Opening a project no longer waits on the session index. The chat

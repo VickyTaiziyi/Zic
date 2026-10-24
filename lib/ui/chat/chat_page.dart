@@ -822,10 +822,15 @@ class _ChatPageState extends State<ChatPage> {
       );
       if (_ackRejected(res)) {
         if (text.isNotEmpty) _state?.dropPendingUser(text);
+        _state?.dropPendingThinking();
         if (mounted) {
           _toast(trP(context, 'chat.send.failed', [_ackReason(res)]));
         }
         return;
+      }
+      final status = res is Map ? res['status'] : null;
+      if (status == null || status == 'accepted') {
+        _state?.showPendingThinking();
       }
       _inputController.clear();
       setState(() => _pendingFiles.clear());
@@ -835,6 +840,7 @@ class _ChatPageState extends State<ChatPage> {
       }
     } catch (e) {
       if (text.isNotEmpty) _state?.dropPendingUser(text);
+      _state?.dropPendingThinking();
       if (mounted) _toast(trP(context, 'chat.send.failed', ['$e']));
     } finally {
       if (mounted) {

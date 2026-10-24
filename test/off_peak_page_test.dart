@@ -110,6 +110,11 @@ void main() {
     expect(find.text('CI 报告'), findsOneWidget);
     expect(find.text('排队第 2 位'), findsOneWidget); // 排队位置徽标
     expect(find.text('等待闲时算力'), findsOneWidget);
+    // 定时任务 tab is on this page, separate from the off-peak queue.
+    await tester.tap(find.text('定时任务'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('已经设好的定时任务'), findsOneWidget);
+
     // 历史 tab holds the terminal runs.
     await tester.tap(find.text('历史'));
     await tester.pumpAndSettle();

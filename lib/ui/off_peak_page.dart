@@ -6,6 +6,7 @@ import '../protocol/conversation.dart';
 import '../protocol/off_peak.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
+import 'automations_page.dart';
 import 'chat/chat_page.dart';
 import 'model_option_field.dart';
 import 'remote_page.dart';
@@ -50,20 +51,38 @@ class _OffPeakPageState extends State<OffPeakPage>
   bool _busy = false;
   Timer? _refresh;
   late final TabController _tabs =
-      TabController(length: 2, vsync: this, initialIndex: 0);
+      TabController(length: 3, vsync: this, initialIndex: 0);
+
+  /// Cron tasks live on the automation port. A test host that only
+  /// implements [OffPeakHost] does not, so the tab stays local.
+  AutomationHost? get _automationHost {
+    final override = widget.hostOverride;
+    if (override != null) {
+      if (override is AutomationHost) return override as AutomationHost;
+      return null;
+    }
+    return widget.hub.sessionOf(widget.device.id);
+  }
   bool _bannerDismissed = false;
 
   @override
   void initState() {
     super.initState();
+    _tabs.addListener(_onTabs);
     _load();
     // Queue position (排队位置) moves server-side; poll while visible.
     _refresh = Timer.periodic(const Duration(seconds: 30), (_) => _load());
   }
 
+  void _onTabs() {
+    if (_tabs.indexIsChanging || !mounted) return;
+    setState(() {});
+  }
+
   @override
   void dispose() {
     _refresh?.cancel();
+    _tabs.removeListener(_onTabs);
     _tabs.dispose();
     super.dispose();
   }
@@ -241,6 +260,7 @@ class _OffPeakPageState extends State<OffPeakPage>
           tabs: [
             Tab(text: tr(context, 'op.tab.settings')),
             Tab(text: tr(context, 'op.tab.history')),
+            Tab(text: tr(context, 'op.tab.scheduled')),
           ],
         ),
       ),
@@ -261,6 +281,7 @@ class _OffPeakPageState extends State<OffPeakPage>
             return _centerNote(context, tr(context, 'op.unavailable.title'),
                 tr(context, 'op.unavailable.body'));
           }
+          if (_tabs.index == 2) return _scheduledView(context);
           if (_loading && _tasks.isEmpty) {
             return Center(
               child: Column(
@@ -280,6 +301,44 @@ class _OffPeakPageState extends State<OffPeakPage>
           return RefreshIndicator(onRefresh: _load, child: view);
         },
       ),
+    );
+  }
+
+  /// Desktop cron tasks already on this computer. Off-peak queue is separate.
+  Widget _scheduledView(BuildContext context) {
+    final host = _automationHost;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: Text(
+            tr(context, 'op.scheduled.hint'),
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.4,
+              color: ZInk.muted(context),
+            ),
+          ),
+        ),
+        Expanded(
+          child: host == null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Text(
+                      tr(context, 'op.scheduled.unavailable'),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: ZInk.muted(context)),
+                    ),
+                  ),
+                )
+              : AutomationsPane(
+                  session: host,
+                  onRetry: () => widget.hub.syncWith(widget.store.devices),
+                ),
+        ),
+      ],
     );
   }
 

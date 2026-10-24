@@ -483,6 +483,65 @@ class _FeedbackButton extends StatelessWidget {
   }
 }
 
+/// Shown the moment a send is accepted, before the desktop streams a
+/// reasoning row. No spinner: an endless animation keeps tests from settling.
+class PendingThinkingCard extends StatelessWidget {
+  const PendingThinkingCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: ZInk.tile(context),
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: ZInk.hairline(context)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(
+                Icons.psychology_outlined,
+                size: 16,
+                color: ZColors.sky400,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    tr(context, 'chat.reasoning.pending.title'),
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: ZInk.solid(context),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    tr(context, 'chat.reasoning.pending.body'),
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.4,
+                      color: ZInk.muted(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Collapsible "思考过程" strip.
 class ReasoningTile extends StatelessWidget {
   final String text;
