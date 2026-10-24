@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.20+21 — 2026-10-24
+
+- Opening a project no longer waits on the session index. The chat
+  subscribes as soon as the workspace bridge is up, and the index
+  attaches in the background.
+- Switching models and sending retry when the desktop rejects them
+  because that session's runtime has not started. A runtime that still
+  fails says so, with the desktop's own message.
+
 ## 1.0.19+20 — 2026-10-23
 
 - Loading earlier messages stays on those messages. A later refresh keeps them.

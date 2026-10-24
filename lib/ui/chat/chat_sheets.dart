@@ -65,7 +65,9 @@ class ModelModeSheet extends StatelessWidget {
     if (current.isNotEmpty && choice.reasoningLevels.contains(current)) {
       return current;
     }
-    return choice.reasoningLevels.isNotEmpty ? choice.reasoningLevels.first : current;
+    return choice.reasoningLevels.isNotEmpty
+        ? choice.reasoningLevels.first
+        : current;
   }
 
   (String, String) _splitModelValue(String value) {
@@ -163,18 +165,19 @@ class ModelModeSheet extends StatelessWidget {
                         model: choice.modelId,
                         thought: _thoughtFor(choice),
                       ),
-                              onAccepted: () => state?.optimisticPatch({
-                                'config': {
-                                  ...?state!.config,
-                                  'provider': choice.providerId,
-                                  'model': choice.modelId,
-                                  'thought': _thoughtFor(choice),
-                                },
-                              }),
-                            ),
+                      onAccepted: () => state?.optimisticPatch({
+                        'config': {
+                          ...?state!.config,
+                          'provider': choice.providerId,
+                          'model': choice.modelId,
+                          'thought': _thoughtFor(choice),
+                        },
+                      }),
+                    ),
                   ),
               ],
-            ] else if (modelOption != null && modelOption.options.isNotEmpty) ...[
+            ] else if (modelOption != null &&
+                modelOption.options.isNotEmpty) ...[
               Text(
                 modelOption.name,
                 style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
@@ -358,7 +361,12 @@ class ModelModeSheet extends StatelessWidget {
             SnackBar(
               content: Text(
                 trP(context, 'chat.sheet.rejected', [
-                  '${res['reasonCode'] ?? res['status']}',
+                  commandAckDetail(
+                    res,
+                    runtimeFailed: tr(context, 'chat.runtime.failed'),
+                    runtimeStarting: tr(context, 'chat.runtime.starting'),
+                    runtimeMessage: state?.runtimeInitialization?.message,
+                  ),
                 ]),
               ),
             ),

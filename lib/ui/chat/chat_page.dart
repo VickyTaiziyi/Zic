@@ -578,11 +578,12 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _run(String errorPrefix, Future<dynamic> Function() run) async {
     try {
       final res = await run();
+      if (!mounted) return;
       if (res is Map &&
           res['status'] != null &&
           res['status'] != 'accepted' &&
           res['status'] != 'noop') {
-        _toast('$errorPrefix: ${res['reasonCode'] ?? res['status']}');
+        _toast('$errorPrefix: ${_ackReason(res)}');
       }
     } catch (e) {
       final business =
@@ -853,10 +854,12 @@ class _ChatPageState extends State<ChatPage> {
       res['status'] != 'noop' &&
       res['status'] != 'duplicate';
 
-  String _ackReason(dynamic res) {
-    if (res is! Map) return '$res';
-    return '${res['reasonCode'] ?? res['message'] ?? res['status']}';
-  }
+  String _ackReason(dynamic res) => commandAckDetail(
+        res,
+        runtimeFailed: tr(context, 'chat.runtime.failed'),
+        runtimeStarting: tr(context, 'chat.runtime.starting'),
+        runtimeMessage: _state?.runtimeInitialization?.message,
+      );
 
   bool _catchUpCurrent(int gen, String sessionId) =>
       mounted && gen == _catchUpGen && _sessionId == sessionId;
@@ -891,9 +894,7 @@ class _ChatPageState extends State<ChatPage> {
     var baseline = _state?.seq ?? 0;
     for (var i = 0; i < 12; i++) {
       await _catchUpDelay(
-        i == 0
-            ? const Duration(milliseconds: 800)
-            : const Duration(seconds: 4),
+        i == 0 ? const Duration(milliseconds: 800) : const Duration(seconds: 4),
       );
       if (!_catchUpCurrent(gen, sessionId) || _replyVisible(text)) return;
       final seq = _state?.seq ?? 0;
@@ -1253,8 +1254,8 @@ class _ChatPageState extends State<ChatPage> {
     final sessionId = _sessionId;
     if (sessionId == null) return;
     try {
-      await AppKv.instance.setString(
-          'chat.draft.$sessionId', _inputController.text);
+      await AppKv.instance
+          .setString('chat.draft.$sessionId', _inputController.text);
     } catch (_) {}
   }
 

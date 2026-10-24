@@ -297,7 +297,8 @@ const _zh = {
   'common.save': '保存',
   // ---- webRemoteControl failure states (official copy) ----
   'remote.failure.session-not-found': '当前 Web 远程控制链接已经失效，请回到桌面端重新开启一次。',
-  'remote.failure.auth-required': 'v4 配对链接需要登录 ZCode 账号（凭据仅存本机）。点下方「登录」完成一次官方登录即可。',
+  'remote.failure.auth-required':
+      'v4 配对链接需要登录 ZCode 账号（凭据仅存本机）。点下方「登录」完成一次官方登录即可。',
   'remote.failure.session-expired': '这次 Web 远程控制会话已经结束了，需要在桌面端重新生成新的链接。',
   'remote.failure.session-conflict': '这个链接已经被其他页面占用，请关闭旧页面后重新扫码。',
   'remote.failure.kicked': 'relay 已踢出这次配对，请关闭其他页面后从桌面端重新生成二维码。',
@@ -470,6 +471,8 @@ const _zh = {
   'chat.sheet.followup': '后续消息',
   'chat.sheet.other': '其他配置',
   'chat.sheet.rejected': '被拒绝: \$0',
+  'chat.runtime.failed': '会话运行时启动失败',
+  'chat.runtime.starting': '会话运行时还在启动',
   'chat.usage.context': '上下文',
   'chat.usage.input': '累计输入',
   'chat.usage.output': '累计输出',
@@ -1020,21 +1023,24 @@ const _en = {
   'home.title': 'Devices',
   'home.caption.start': 'Open remote control on ZCode desktop and scan',
   'home.caption.summary': '\$0 devices · \$1 online · \$2 running',
-  'home.authNotice': 'v4 pairing links need a one-time ZCode sign-in (app-private file on this phone)',
+  'home.authNotice':
+      'v4 pairing links need a one-time ZCode sign-in (app-private file on this phone)',
   'home.empty.scan': 'Scan to add',
   'home.empty.paste': 'Paste a link',
   'home.startup.stalled': 'Startup blocked by the device system',
   'home.loadingDevices': 'Loading devices…',
-  'home.startup.hint': 'Local storage initialization timed out. The diagnostics below pinpoint which component is wedged — screenshot it for the developer.',
+  'home.startup.hint':
+      'Local storage initialization timed out. The diagnostics below pinpoint which component is wedged — screenshot it for the developer.',
   'home.startup.elapsed': 'Waited \$0s · auto-retry #\$1',
   'home.startup.fallback': 'Skip local data and continue',
-  'home.degraded.banner': 'Local storage unavailable — temporary mode: devices and sign-in will not survive an app restart',
+  'home.degraded.banner':
+      'Local storage unavailable — temporary mode: devices and sign-in will not survive an app restart',
   'home.startup.probes': 'Component diagnostics',
   'home.startup.probing': 'Probing…',
   'home.startup.probesEmpty': 'Not run yet',
-  'home.startup.probesFooter': 'Each probe has an independent 3s timeout; green=ok red=timeout yellow=error.',
+  'home.startup.probesFooter':
+      'Each probe has an independent 3s timeout; green=ok red=timeout yellow=error.',
   'home.startup.rerun': 'Re-run',
-
 
   'devices.empty.body':
       'Open "Remote Control" in ZCode desktop,\nthen scan or paste the link',
@@ -1274,7 +1280,8 @@ const _en = {
   'chat.mention.searchHint': 'Type to search files, skills or sessions',
   'chat.mention.emptyResults': 'No matching mentions',
   'chat.mention.category.files': 'Files',
-  'chat.mention.category.files.description': 'Search workspace files and insert a reference',
+  'chat.mention.category.files.description':
+      'Search workspace files and insert a reference',
   'chat.mention.category.skills': 'Skills',
   'chat.mention.category.skills.description': 'Insert a skill reference',
   'chat.mention.category.subagents': 'Subagents',
@@ -1296,7 +1303,8 @@ const _en = {
   'chat.rewind.checking': 'Checking rewritable files…',
   'chat.rewind.safeTitle': 'These files can be safely rewound',
   'chat.rewind.unsafeTitle': 'Some files cannot be safely rewound',
-  'chat.rewind.cannotApply': 'Some files cannot be safely rewound. No files were written.',
+  'chat.rewind.cannotApply':
+      'Some files cannot be safely rewound. No files were written.',
   'chat.rewind.confirm': 'Rewind changes',
   'chat.queue.autoOff': 'Auto-send: off',
   'chat.queue.sendNow': 'Send now',
@@ -1314,7 +1322,8 @@ const _en = {
   'chat.interact.submit': 'Submit',
   'chat.interact.plan.title': 'Plan approval',
   'chat.interact.plan.viewPlan': 'View plan',
-  'chat.interact.plan.feedback': 'Feedback (optional, used as the decline reason)',
+  'chat.interact.plan.feedback':
+      'Feedback (optional, used as the decline reason)',
   'chat.interact.plan.approve': 'Approve & continue',
   'chat.interact.plan.decline': 'Decline',
   'chat.interact.form.submit': 'Submit answers',
@@ -1322,7 +1331,8 @@ const _en = {
   'chat.interact.form.custom': 'Custom answer…',
   'chat.interact.form.multi': 'multi-select',
   'chat.interact.hook.title': 'Workspace hook review',
-  'chat.interact.hook.warning': 'These hooks come from the workspace and may execute code',
+  'chat.interact.hook.warning':
+      'These hooks come from the workspace and may execute code',
   'chat.interact.hook.trust': 'Trust selected hooks',
   'chat.interact.hook.empty': 'No hooks to review',
   'chat.mode.build': 'Confirm changes',
@@ -1344,6 +1354,8 @@ const _en = {
   'chat.sheet.followup': 'Follow-up messages',
   'chat.sheet.other': 'Other settings',
   'chat.sheet.rejected': 'Rejected: \$0',
+  'chat.runtime.failed': 'Session runtime failed to start',
+  'chat.runtime.starting': 'Session runtime is still starting',
   'chat.usage.context': 'Context',
   'chat.usage.input': 'Total input',
   'chat.usage.output': 'Total output',
@@ -1539,7 +1551,8 @@ const _en = {
       'Sign in on the official page; Zic uses the session for your desktop link (protocol v4)',
   'login.status.waiting': 'Waiting for sign-in…',
   'login.status.relogin': 'Existing session found, verifying…',
-  'login.status.captured': 'Session captured — switch accounts in the page if needed, then tap Done',
+  'login.status.captured':
+      'Session captured — switch accounts in the page if needed, then tap Done',
   'login.privacy':
       'Credentials stay in this app\u2019s private directory, are not cloud-backed, and are sent only to the paired host',
   'login.done': 'Done',
@@ -1581,7 +1594,8 @@ const _en = {
   'about.privacy': 'Privacy policy',
   'about.rights': 'Rights',
   'about.notices': 'Acknowledgements',
-  'about.noticesHint': 'ZLinker and dependency licenses, each opens its upstream',
+  'about.noticesHint':
+      'ZLinker and dependency licenses, each opens its upstream',
   'about.android': 'Android 8.0 and newer',
   'about.linkFailed': 'Could not open the link',
   'about.tos': 'Terms of Service',
@@ -1594,7 +1608,8 @@ const _en = {
   'usage.opens': '\$0 opens',
   'usage.addedAt': 'Added \$0',
   'usage.neverUsed': 'Never used',
-  'usage.empty': 'No devices yet. After you add and open one, open counts and last-used times show up here. They stay on this phone.',
+  'usage.empty':
+      'No devices yet. After you add and open one, open counts and last-used times show up here. They stay on this phone.',
   'tasks.menu.usage': 'Usage stats',
   'tasks.menu.providers': 'Model settings',
   'usageRpc.title': 'Usage',
@@ -1618,13 +1633,16 @@ const _en = {
   'deskSet.loadFailed': 'Load failed: \$0',
   'deskSet.saveFailed': 'Save failed: \$0',
   'deskSet.interaction': 'Interaction behavior',
-  'deskSet.interactionHint': 'Default behavior when sending a follow-up while a turn is running',
+  'deskSet.interactionHint':
+      'Default behavior when sending a follow-up while a turn is running',
   'deskSet.interactionQueue': 'Queue',
-  'deskSet.interactionQueueHint': 'Queue automatically, sent after the current turn ends',
+  'deskSet.interactionQueueHint':
+      'Queue automatically, sent after the current turn ends',
   'deskSet.interactionGuide': 'Guide',
   'deskSet.interactionGuideHint': 'Steer the running task toward the new input',
   'deskSet.autoArchive': 'Auto-archive old tasks',
-  'deskSet.autoArchiveHint': 'Archive eligible completed tasks after the retention window',
+  'deskSet.autoArchiveHint':
+      'Archive eligible completed tasks after the retention window',
   'deskSet.autoArchiveDays': '\$0 days',
   'providers.title': 'Model settings',
   'providers.suggest': 'Suggest endpoints and fetch models',
@@ -1841,9 +1859,11 @@ const _en = {
   'update.download': 'Download in browser',
   'update.later': 'Later',
   'update.failed': 'Update check failed. Try again later',
-  'update.unavailable': 'The release list is not reachable yet. After the repository is public, installed copies prompt on launch when a newer version is published.',
+  'update.unavailable':
+      'The release list is not reachable yet. After the repository is public, installed copies prompt on launch when a newer version is published.',
   'update.storePending': 'Check for updates in the App Store',
-  'update.manualOnly': 'No update channel is configured in this build; update from the project releases page',
+  'update.manualOnly':
+      'No update channel is configured in this build; update from the project releases page',
 
   // ---- Off-peak functional alignment (official desktop dictionary) ----
   'op.tab.settings': 'Settings',

@@ -44,9 +44,12 @@ void main() {
     });
 
     test('pending user stays until the server row arrives', () {
-      _injectSnapshot(state, seq: 3, rows: [
-        {'rowId': 1, 'kind': 'assistantText', 'text': 'old'},
-      ], totalCount: 1);
+      _injectSnapshot(state,
+          seq: 3,
+          rows: [
+            {'rowId': 1, 'kind': 'assistantText', 'text': 'old'},
+          ],
+          totalCount: 1);
       state.showPendingUser('hello');
       expect(state.rows.last['local'], isTrue);
       expect(state.rows.last['text'], 'hello');
@@ -72,18 +75,24 @@ void main() {
 
     test('snapshot keeps a pending user the server has not stored', () {
       state.showPendingUser('hello');
-      _injectSnapshot(state, seq: 4, rows: [
-        {'rowId': 1, 'kind': 'assistantText', 'text': 'old'},
-      ], totalCount: 1);
+      _injectSnapshot(state,
+          seq: 4,
+          rows: [
+            {'rowId': 1, 'kind': 'assistantText', 'text': 'old'},
+          ],
+          totalCount: 1);
       expect(state.rows.last['local'], isTrue);
       expect(state.rows.last['text'], 'hello');
     });
 
     test('snapshot drops a pending user once the server copy is present', () {
       state.showPendingUser('hello');
-      _injectSnapshot(state, seq: 5, rows: [
-        {'rowId': 2, 'kind': 'userInput', 'text': 'hello'},
-      ], totalCount: 1);
+      _injectSnapshot(state,
+          seq: 5,
+          rows: [
+            {'rowId': 2, 'kind': 'userInput', 'text': 'hello'},
+          ],
+          totalCount: 1);
       expect(state.rows.where((r) => r['local'] == true), isEmpty);
       expect(state.rows, hasLength(1));
     });
@@ -94,7 +103,10 @@ void main() {
         'payload': {
           'kind': 'deltas',
           'deltas': [
-            {'op': 'row.appended', 'row': {'rowId': 99, 'kind': 'user', 'text': 'new'}},
+            {
+              'op': 'row.appended',
+              'row': {'rowId': 99, 'kind': 'user', 'text': 'new'}
+            },
           ],
         },
         'fromSeq': 1,
@@ -116,7 +128,10 @@ void main() {
         'payload': {
           'kind': 'deltas',
           'deltas': [
-            {'op': 'row.upserted', 'row': {'rowId': 1, 'kind': 'user', 'text': 'updated'}},
+            {
+              'op': 'row.upserted',
+              'row': {'rowId': 1, 'kind': 'user', 'text': 'updated'}
+            },
           ],
         },
         'fromSeq': 5,
@@ -128,11 +143,13 @@ void main() {
     });
 
     test('row.removed removes from rowId upward', () {
-      _injectSnapshot(state, rows: [
-        {'rowId': 1, 'kind': 'user', 'text': 'a'},
-        {'rowId': 2, 'kind': 'assistant', 'text': 'b'},
-        {'rowId': 3, 'kind': 'user', 'text': 'c'},
-      ], totalCount: 3);
+      _injectSnapshot(state,
+          rows: [
+            {'rowId': 1, 'kind': 'user', 'text': 'a'},
+            {'rowId': 2, 'kind': 'assistant', 'text': 'b'},
+            {'rowId': 3, 'kind': 'user', 'text': 'c'},
+          ],
+          totalCount: 3);
 
       state.applyFrame({
         'payload': {
@@ -180,7 +197,12 @@ void main() {
         'payload': {
           'kind': 'deltas',
           'deltas': [
-            {'op': 'row.delta', 'rowId': 1, 'path': 'inputText', 'append': ' -la'},
+            {
+              'op': 'row.delta',
+              'rowId': 1,
+              'path': 'inputText',
+              'append': ' -la'
+            },
           ],
         },
         'fromSeq': 5,
@@ -203,7 +225,12 @@ void main() {
         'payload': {
           'kind': 'deltas',
           'deltas': [
-            {'op': 'row.delta', 'rowId': 1, 'path': 'output.text', 'append': '\nfile2'},
+            {
+              'op': 'row.delta',
+              'rowId': 1,
+              'path': 'output.text',
+              'append': '\nfile2'
+            },
           ],
         },
         'fromSeq': 5,
@@ -223,7 +250,10 @@ void main() {
         'payload': {
           'kind': 'deltas',
           'deltas': [
-            {'op': 'state.updated', 'patch': {'revision': 6}},
+            {
+              'op': 'state.updated',
+              'patch': {'revision': 6}
+            },
           ],
         },
         'fromSeq': 5,
@@ -239,7 +269,10 @@ void main() {
         'payload': {
           'kind': 'deltas',
           'deltas': [
-            {'op': 'state.updated', 'patch': {'revision': 3}},
+            {
+              'op': 'state.updated',
+              'patch': {'revision': 3}
+            },
           ],
         },
         'fromSeq': 0,
@@ -299,13 +332,17 @@ void main() {
       expect(items[0]['queueItemId'], 'q2');
     });
 
-    test('canLoadOlder is true when the window has not reached the store '
+    test(
+        'canLoadOlder is true when the window has not reached the store '
         'top', () {
       // Official rowsWindow semantics: firstRowId is the STORE-first row;
       // the window is the tail. window[10] != store[1] → older rows exist.
-      _injectSnapshot(state, rows: [
-        {'rowId': 10, 'kind': 'user', 'text': 'latest'},
-      ], totalCount: 100, firstRowId: 1);
+      _injectSnapshot(state,
+          rows: [
+            {'rowId': 10, 'kind': 'user', 'text': 'latest'},
+          ],
+          totalCount: 100,
+          firstRowId: 1);
 
       expect(state.canLoadOlder, isTrue);
       // Pagination cursor is the window's first row, NOT the store-first.
@@ -313,25 +350,34 @@ void main() {
     });
 
     test('canLoadOlder is false while a hasMore=false response is known', () {
-      _injectSnapshot(state, rows: [
-        {'rowId': 10, 'kind': 'user', 'text': 'latest'},
-      ], totalCount: 100, firstRowId: 1);
+      _injectSnapshot(state,
+          rows: [
+            {'rowId': 10, 'kind': 'user', 'text': 'latest'},
+          ],
+          totalCount: 100,
+          firstRowId: 1);
       state.hasMore = false;
       expect(state.canLoadOlder, isFalse);
     });
 
     test('canLoadOlder is false when all rows loaded', () {
-      _injectSnapshot(state, rows: [
-        {'rowId': 1, 'kind': 'user', 'text': 'first'},
-      ], totalCount: 1, firstRowId: 1);
+      _injectSnapshot(state,
+          rows: [
+            {'rowId': 1, 'kind': 'user', 'text': 'first'},
+          ],
+          totalCount: 1,
+          firstRowId: 1);
 
       expect(state.canLoadOlder, isFalse);
     });
 
     test('prependOlderRows inserts before existing', () {
-      _injectSnapshot(state, rows: [
-        {'rowId': 3, 'kind': 'assistant', 'text': 'c'},
-      ], totalCount: 3, firstRowId: 3);
+      _injectSnapshot(state,
+          rows: [
+            {'rowId': 3, 'kind': 'assistant', 'text': 'c'},
+          ],
+          totalCount: 3,
+          firstRowId: 3);
 
       state.prependOlderRows([
         {'rowId': 1, 'kind': 'user', 'text': 'a'},
@@ -346,9 +392,14 @@ void main() {
     });
 
     test('snapshot keeps rows already loaded above the new tail', () {
-      _injectSnapshot(state, seq: 5, rows: [
-        {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
-      ], totalCount: 10, firstRowId: 1, snapshot: {'logEpoch': 'e1'});
+      _injectSnapshot(state,
+          seq: 5,
+          rows: [
+            {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
+          ],
+          totalCount: 10,
+          firstRowId: 1,
+          snapshot: {'logEpoch': 'e1'});
       state
         ..hasMore = true
         ..prependOlderRows([
@@ -356,10 +407,15 @@ void main() {
           {'rowId': 9, 'kind': 'assistantText', 'text': 'older-2'},
         ], 8);
 
-      _injectSnapshot(state, seq: 6, rows: [
-        {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
-        {'rowId': 11, 'kind': 'assistantText', 'text': 'reply'},
-      ], totalCount: 11, firstRowId: 1, snapshot: {'logEpoch': 'e1'});
+      _injectSnapshot(state,
+          seq: 6,
+          rows: [
+            {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
+            {'rowId': 11, 'kind': 'assistantText', 'text': 'reply'},
+          ],
+          totalCount: 11,
+          firstRowId: 1,
+          snapshot: {'logEpoch': 'e1'});
 
       expect(state.rows.map((r) => r['rowId']), [8, 9, 10, 11]);
       expect(state.firstRowId, 8);
@@ -368,18 +424,28 @@ void main() {
     });
 
     test('snapshot drops paged rows when the log epoch changes', () {
-      _injectSnapshot(state, seq: 5, rows: [
-        {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
-      ], totalCount: 10, firstRowId: 1, snapshot: {'logEpoch': 'e1'});
+      _injectSnapshot(state,
+          seq: 5,
+          rows: [
+            {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
+          ],
+          totalCount: 10,
+          firstRowId: 1,
+          snapshot: {'logEpoch': 'e1'});
       state
         ..hasMore = true
         ..prependOlderRows([
           {'rowId': 8, 'kind': 'userInput', 'text': 'older'},
         ], 8);
 
-      _injectSnapshot(state, seq: 6, rows: [
-        {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
-      ], totalCount: 10, firstRowId: 1, snapshot: {'logEpoch': 'e2'});
+      _injectSnapshot(state,
+          seq: 6,
+          rows: [
+            {'rowId': 10, 'kind': 'userInput', 'text': 'tail'},
+          ],
+          totalCount: 10,
+          firstRowId: 1,
+          snapshot: {'logEpoch': 'e2'});
 
       expect(state.rows.map((r) => r['rowId']), [10]);
       expect(state.firstRowId, 10);
@@ -406,7 +472,9 @@ void main() {
         'revision': 5,
         'control': {'phase': 'running', 'canStop': true},
         'config': {'model': 'GLM-5.2', 'thought': 'max', 'mode': 'build'},
-        'usage': {'contextWindow': {'usedTokens': 100, 'maxTokens': 200000}},
+        'usage': {
+          'contextWindow': {'usedTokens': 100, 'maxTokens': 200000}
+        },
       });
 
       expect(state.isRunning, isTrue);
@@ -480,8 +548,20 @@ void main() {
           'kind': 'snapshot',
           'snapshot': {
             'sessions': [
-              {'sessionId': 'older', 'lastActivityAt': 100, 'createdAt': 50, 'phase': 'draft', 'title': 'Old'},
-              {'sessionId': 'newer', 'lastActivityAt': 200, 'createdAt': 50, 'phase': 'draft', 'title': 'New'},
+              {
+                'sessionId': 'older',
+                'lastActivityAt': 100,
+                'createdAt': 50,
+                'phase': 'draft',
+                'title': 'Old'
+              },
+              {
+                'sessionId': 'newer',
+                'lastActivityAt': 200,
+                'createdAt': 50,
+                'phase': 'draft',
+                'title': 'New'
+              },
             ],
           },
         },
@@ -521,8 +601,20 @@ void main() {
 
     test('session.removed delta', () {
       _injectSessionsSnapshot(state, sessions: [
-        {'sessionId': 's1', 'title': 'T1', 'phase': 'draft', 'lastActivityAt': 0, 'createdAt': 0},
-        {'sessionId': 's2', 'title': 'T2', 'phase': 'draft', 'lastActivityAt': 0, 'createdAt': 0},
+        {
+          'sessionId': 's1',
+          'title': 'T1',
+          'phase': 'draft',
+          'lastActivityAt': 0,
+          'createdAt': 0
+        },
+        {
+          'sessionId': 's2',
+          'title': 'T2',
+          'phase': 'draft',
+          'lastActivityAt': 0,
+          'createdAt': 0
+        },
       ]);
 
       state.applyFrame({
@@ -570,6 +662,162 @@ void main() {
 
       expect(state.sessions['side-1']!.parentSessionId, 'main-1');
       expect(state.sessions['main-1']!.parentSessionId, isNull);
+    });
+  });
+
+  group('runtime initialization', () {
+    late ConversationState state;
+
+    setUp(() {
+      state = ConversationState();
+    });
+
+    test('a snapshot without the field counts as ready', () {
+      _injectSnapshot(state);
+      expect(state.runtimeInitialization, isNull);
+      expect(state.runtimeReady, isTrue);
+    });
+
+    test('failed snapshot keeps the attempt id and message', () {
+      _injectSnapshot(state, snapshot: {
+        'runtimeInitialization': {
+          'status': 'failed',
+          'attemptId': 'attempt-a',
+          'reasonCode': 'requestRuntimePreferences.timeout',
+          'message': 'preferences timed out',
+        },
+      });
+      final init = state.runtimeInitialization!;
+      expect(init.isFailed, isTrue);
+      expect(init.attemptId, 'attempt-a');
+      expect(init.message, 'preferences timed out');
+      expect(state.runtimeReady, isFalse);
+    });
+
+    test('state.updated replaces the runtime status', () {
+      _injectSnapshot(state, seq: 1, snapshot: {
+        'runtimeInitialization': {
+          'status': 'initializing',
+          'attemptId': 'attempt-a',
+        },
+      });
+      expect(state.runtimeReady, isFalse);
+      state.applyFrame({
+        'fromSeq': 1,
+        'toSeq': 2,
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'state.updated',
+              'patch': {
+                'runtimeInitialization': {
+                  'status': 'ready',
+                  'attemptId': 'attempt-a',
+                },
+              },
+            },
+          ],
+        },
+      }, onGap: () => fail('should not gap'));
+      expect(state.runtimeReady, isTrue);
+      expect(state.runtimeInitialization!.status, 'ready');
+    });
+
+    test('waitUntilRuntimeReady completes when the runtime becomes ready',
+        () async {
+      _injectSnapshot(state, snapshot: {
+        'runtimeInitialization': {
+          'status': 'initializing',
+          'attemptId': 'attempt-a',
+        },
+      });
+      final pending = state.waitUntilRuntimeReady(const Duration(seconds: 2));
+      state.applyFrame({
+        'fromSeq': state.seq,
+        'toSeq': state.seq + 1,
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'state.updated',
+              'patch': {
+                'runtimeInitialization': {
+                  'status': 'ready',
+                  'attemptId': 'attempt-a',
+                },
+              },
+            },
+          ],
+        },
+      }, onGap: () => fail('should not gap'));
+      expect(await pending, isTrue);
+    });
+
+    test('waitUntilRuntimeReady stops when initializing turns into failed',
+        () async {
+      _injectSnapshot(state, snapshot: {
+        'runtimeInitialization': {
+          'status': 'initializing',
+          'attemptId': 'attempt-a',
+        },
+      });
+      final pending = state.waitUntilRuntimeReady(const Duration(seconds: 5));
+      state.applyFrame({
+        'fromSeq': state.seq,
+        'toSeq': state.seq + 1,
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'state.updated',
+              'patch': {
+                'runtimeInitialization': {
+                  'status': 'failed',
+                  'attemptId': 'attempt-b',
+                  'message': 'hooks failed',
+                },
+              },
+            },
+          ],
+        },
+      }, onGap: () => fail('should not gap'));
+      expect(await pending, isFalse);
+    });
+
+    test('command ack text explains the shared runtime guard', () {
+      expect(
+        commandAckDetail(
+          {
+            'status': 'rejected',
+            'reasonCode': 'guard.runtimeInitializationFailed'
+          },
+          runtimeFailed: '会话运行时启动失败',
+          runtimeStarting: '会话运行时还在启动',
+          runtimeMessage: 'preferences timed out',
+        ),
+        '会话运行时启动失败: preferences timed out',
+      );
+      expect(
+        commandAckDetail(
+          {
+            'status': 'rejected',
+            'reasonCode': 'guard.runtimeInitializing',
+            'message': 'still booting',
+          },
+          runtimeFailed: '会话运行时启动失败',
+          runtimeStarting: '会话运行时还在启动',
+        ),
+        '会话运行时还在启动: still booting',
+      );
+      expect(
+        commandAckDetail(
+          {'status': 'rejected', 'reasonCode': 'guard.other'},
+          runtimeFailed: '会话运行时启动失败',
+          runtimeStarting: '会话运行时还在启动',
+        ),
+        'guard.other',
+      );
     });
   });
 }

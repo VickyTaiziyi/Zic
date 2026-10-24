@@ -87,27 +87,27 @@ class ConversationTransport {
 
   Future<void> handshake() {
     if (_handshaken) return Future.value();
-    return _handshakeFuture ??=
-        () async {
-          final hello = await _channels.call(
-            channel,
-            'helloConversationV4',
-            [],
-          );
-          _log('[v4] hello: $hello');
-          if (hello is Map) {
-            connectionId = hello['connectionId'] as String?;
-          }
-          // The desktop copies these onto conversationSubscribe. The web
-          // client sends both. Without them the open subscription gets one
-          // snapshot and later turns stay invisible until the next subscribe.
-          // An older desktop that rejects the keys is retried without them.
-          await _initializeHello();
-          _handshaken = true;
-        }().catchError((e) {
-          _handshakeFuture = null;
-          throw e;
-        });
+    return _handshakeFuture ??= () async {
+      final hello = await _channels.call(
+        channel,
+        'helloConversationV4',
+        [],
+      );
+      _log('[v4] hello: $hello');
+      if (hello is Map) {
+        connectionId = hello['connectionId'] as String?;
+      }
+      // The desktop copies these onto conversationSubscribe. The web
+      // client sends both. Without them the open subscription gets one
+      // snapshot and later turns stay invisible until the next subscribe.
+      // An older desktop that rejects the keys is retried without them.
+      await _initializeHello();
+      _handshaken = true;
+    }()
+        .catchError((e) {
+      _handshakeFuture = null;
+      throw e;
+    });
   }
 
   Future<ConversationSubscription> subscribe(String sessionId) async {
@@ -211,6 +211,9 @@ class ConversationTransport {
       };
       res = await _sendCommandWithRetry(retryEnvelope, timeout);
     }
+    if (sessionId != null) {
+      res = await _retryRuntimeGuard(sessionId, type, payload, res, timeout);
+    }
     if (sessionId != null && res is Map && res['revisionAtDecision'] is num) {
       final rev = (res['revisionAtDecision'] as num).toInt();
       final status = res['status'];
@@ -218,8 +221,8 @@ class ConversationTransport {
       // command bumps the revision by one, so the next CAS base is +1.
       final floor =
           (status == 'accepted' || status == 'noop' || status == 'duplicate')
-          ? rev + 1
-          : rev;
+              ? rev + 1
+              : rev;
       if (floor > (_ackedRevisions[sessionId] ?? 0)) {
         _ackedRevisions[sessionId] = floor;
       }
@@ -234,9 +237,13 @@ class ConversationTransport {
     Duration timeout,
   ) async {
     try {
-      return await _channels.call(channel, 'sendConversationCommandV4', [
-        {...scope, 'envelope': envelope},
-      ], timeout: timeout);
+      return await _channels.call(
+          channel,
+          'sendConversationCommandV4',
+          [
+            {...scope, 'envelope': envelope},
+          ],
+          timeout: timeout);
     } on TimeoutException {
       // Retry only when the relay dropped mid-flight (bridge degraded): the
       // command then never reached the server. If the bridge is still
@@ -252,10 +259,86 @@ class ConversationTransport {
         'commandId': generateUuid(),
         'issuedAt': DateTime.now().millisecondsSinceEpoch,
       };
-      return _channels.call(channel, 'sendConversationCommandV4', [
-        {...scope, 'envelope': fresh},
-      ], timeout: timeout);
+      return _channels.call(
+          channel,
+          'sendConversationCommandV4',
+          [
+            {...scope, 'envelope': fresh},
+          ],
+          timeout: timeout);
     }
+  }
+
+  /// Model switches and sends share one desktop guard: the command is
+  /// rejected while `runtimeInitialization` is not `ready`. A rejection is
+  /// not applied, so it is safe to resend. `failed` only restarts when the
+  /// subscribe carries that attempt id; `initializing` must be waited out,
+  /// because a resubscribe would cancel the start already in flight.
+  Future<dynamic> _retryRuntimeGuard(
+    String sessionId,
+    String type,
+    Map<String, dynamic> payload,
+    dynamic res,
+    Duration timeout,
+  ) async {
+    var current = res;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      if (current is! Map) return current;
+      final code = current['reasonCode'];
+      final sub = _subscriptions[sessionId];
+      final init = sub?.state.runtimeInitialization;
+      final failed = code == RuntimeInitialization.guardFailed ||
+          (code == RuntimeInitialization.guardInitializing &&
+              init?.isFailed == true);
+      final initializing = code == RuntimeInitialization.guardInitializing;
+      if (!failed && !initializing) return current;
+      if (failed) {
+        if (sub != null && init == null) {
+          await sub.state.waitForRuntimeInitialization(
+            const Duration(seconds: 5),
+          );
+        }
+        final started = await sub?.retryFailedInitialization() ?? false;
+        final stillFailed = sub?.state.runtimeInitialization?.isFailed == true;
+        if (!started && stillFailed) return current;
+      }
+      final ready = await sub?.state.waitUntilRuntimeReady(
+            const Duration(seconds: 12),
+          ) ??
+          false;
+      if (!ready) {
+        final now = sub?.state.runtimeInitialization;
+        if (now != null &&
+            now.isFailed &&
+            code != RuntimeInitialization.guardFailed &&
+            attempt == 0) {
+          current = {
+            ...current.cast<String, dynamic>(),
+            'reasonCode': RuntimeInitialization.guardFailed,
+            if (now.message != null) 'message': now.message,
+          };
+          continue;
+        }
+        return current;
+      }
+      _log('[v4] command $type retry after $code');
+      final baseRevision = [
+        sub?.state.revision ?? 0,
+        _ackedRevisions[sessionId] ?? 0,
+      ].reduce((a, b) => a > b ? a : b);
+      current = await _sendCommandWithRetry({
+        'commandId': generateUuid(),
+        'clientId': clientId,
+        'sessionId': sessionId,
+        if (_casCommands.contains(type)) 'baseRevision': baseRevision,
+        if (_rowTargetCommands.contains(type) && sub?.state.logEpoch != null)
+          'baseLogEpoch': sub!.state.logEpoch,
+        'type': type,
+        'payload': payload,
+        'issuedAt': DateTime.now().millisecondsSinceEpoch,
+      }, timeout);
+    }
+    return current;
   }
 
   /// Creates a new session (mirrors the composer's first-send path):
@@ -270,18 +353,23 @@ class ConversationTransport {
     List<String>? mcpServers,
     Duration timeout = const Duration(seconds: 90),
   }) async {
-    final res = await sendCommand(null, 'createSession', {
-      'workspaceId': workspaceId,
-      if (firstText != null)
-        'firstInput': {
-          'text': firstText,
-          if (attachments != null && attachments.isNotEmpty)
-            'attachments': attachments,
+    final res = await sendCommand(
+        null,
+        'createSession',
+        {
+          'workspaceId': workspaceId,
+          if (firstText != null)
+            'firstInput': {
+              'text': firstText,
+              if (attachments != null && attachments.isNotEmpty)
+                'attachments': attachments,
+            },
+          if (config != null) 'config': config,
+          if (runtimeModel != null) 'runtimeModel': runtimeModel,
+          if (mcpServers != null && mcpServers.isNotEmpty)
+            'mcpServers': mcpServers,
         },
-      if (config != null) 'config': config,
-      if (runtimeModel != null) 'runtimeModel': runtimeModel,
-      if (mcpServers != null && mcpServers.isNotEmpty) 'mcpServers': mcpServers,
-    }, timeout: timeout);
+        timeout: timeout);
     final map = res is Map ? res.cast<String, dynamic>() : null;
     final status = map?['status'];
     if (status != 'accepted') {
@@ -338,21 +426,23 @@ class ConversationTransport {
     String? offPeakRunType,
     String? botDeliveryTarget,
     List<String>? toolDisallowlist,
-  }) => sendCommand(sessionId, 'sendText', {
-    'text': text,
-    if (attachments != null && attachments.isNotEmpty)
-      'attachments': attachments,
-    if (heldQueueDisposition != null)
-      'heldQueueDisposition': heldQueueDisposition,
-    if (expectedHeldQueueItemIds != null && expectedHeldQueueItemIds.isNotEmpty)
-      'expectedHeldQueueItemIds': expectedHeldQueueItemIds,
-    if (automationId != null) 'automationId': automationId,
-    if (offPeakTaskId != null) 'offPeakTaskId': offPeakTaskId,
-    if (offPeakRunType != null) 'offPeakRunType': offPeakRunType,
-    if (botDeliveryTarget != null) 'botDeliveryTarget': botDeliveryTarget,
-    if (toolDisallowlist != null && toolDisallowlist.isNotEmpty)
-      'toolDisallowlist': toolDisallowlist,
-  });
+  }) =>
+      sendCommand(sessionId, 'sendText', {
+        'text': text,
+        if (attachments != null && attachments.isNotEmpty)
+          'attachments': attachments,
+        if (heldQueueDisposition != null)
+          'heldQueueDisposition': heldQueueDisposition,
+        if (expectedHeldQueueItemIds != null &&
+            expectedHeldQueueItemIds.isNotEmpty)
+          'expectedHeldQueueItemIds': expectedHeldQueueItemIds,
+        if (automationId != null) 'automationId': automationId,
+        if (offPeakTaskId != null) 'offPeakTaskId': offPeakTaskId,
+        if (offPeakRunType != null) 'offPeakRunType': offPeakRunType,
+        if (botDeliveryTarget != null) 'botDeliveryTarget': botDeliveryTarget,
+        if (toolDisallowlist != null && toolDisallowlist.isNotEmpty)
+          'toolDisallowlist': toolDisallowlist,
+      });
 
   Future<dynamic> sendGoalCommand(
     String sessionId,
@@ -360,14 +450,16 @@ class ConversationTransport {
     String? displayText,
     String? heldQueueDisposition,
     List<String>? expectedHeldQueueItemIds,
-  }) => sendCommand(sessionId, 'sendGoalCommand', {
-    'text': text,
-    if (displayText != null) 'displayText': displayText,
-    if (heldQueueDisposition != null)
-      'heldQueueDisposition': heldQueueDisposition,
-    if (expectedHeldQueueItemIds != null && expectedHeldQueueItemIds.isNotEmpty)
-      'expectedHeldQueueItemIds': expectedHeldQueueItemIds,
-  });
+  }) =>
+      sendCommand(sessionId, 'sendGoalCommand', {
+        'text': text,
+        if (displayText != null) 'displayText': displayText,
+        if (heldQueueDisposition != null)
+          'heldQueueDisposition': heldQueueDisposition,
+        if (expectedHeldQueueItemIds != null &&
+            expectedHeldQueueItemIds.isNotEmpty)
+          'expectedHeldQueueItemIds': expectedHeldQueueItemIds,
+      });
 
   Future<dynamic> pauseGoal(String sessionId) =>
       sendCommand(sessionId, 'pauseGoal', {});
@@ -398,9 +490,8 @@ class ConversationTransport {
     });
     final message = res is Map ? '${res['message'] ?? ''}' : '';
     if (message.contains('Unsupported reasoning effort')) {
-      final fallback = (thought == 'enabled' || thought == 'off')
-          ? 'max'
-          : 'enabled';
+      final fallback =
+          (thought == 'enabled' || thought == 'off') ? 'max' : 'enabled';
       _log('[v4] switchModelConfig retry with thought=$fallback');
       res = await sendCommand(sessionId, 'switchModelConfig', {
         'provider': provider,
@@ -425,10 +516,11 @@ class ConversationTransport {
     String sessionId,
     Map<String, dynamic> target,
     String? feedback,
-  ) => sendCommand(sessionId, 'setAssistantFeedback', {
-    'target': target,
-    'feedback': feedback,
-  });
+  ) =>
+      sendCommand(sessionId, 'setAssistantFeedback', {
+        'target': target,
+        'feedback': feedback,
+      });
 
   Future<dynamic> retryTurn(String sessionId, Map<String, dynamic> target) =>
       sendCommand(sessionId, 'retryTurn', {'target': target});
@@ -440,10 +532,11 @@ class ConversationTransport {
     String sessionId,
     String queueItemId,
     String newText,
-  ) => sendCommand(sessionId, 'editQueueItem', {
-    'queueItemId': queueItemId,
-    'newText': newText,
-  });
+  ) =>
+      sendCommand(sessionId, 'editQueueItem', {
+        'queueItemId': queueItemId,
+        'newText': newText,
+      });
 
   Future<dynamic> deleteQueueItem(String sessionId, String queueItemId) =>
       sendCommand(sessionId, 'deleteQueueItem', {'queueItemId': queueItemId});
@@ -457,10 +550,11 @@ class ConversationTransport {
     String sessionId,
     String queueItemId,
     String? beforeQueueItemId,
-  ) => sendCommand(sessionId, 'reorderQueueItem', {
-    'queueItemId': queueItemId,
-    'beforeQueueItemId': beforeQueueItemId,
-  });
+  ) =>
+      sendCommand(sessionId, 'reorderQueueItem', {
+        'queueItemId': queueItemId,
+        'beforeQueueItemId': beforeQueueItemId,
+      });
 
   /// Defers the interaction auto-resolution timer (desktop setting
   /// 「提问自动继续」≈ 5 minutes). No CAS fields in the web schema.
@@ -491,34 +585,38 @@ class ConversationTransport {
     required String requestedDelivery,
     String? heldQueueDisposition,
     List<String>? expectedHeldQueueItemIds,
-  }) => sendCommand(sessionId, 'sendText', {
-    'text': text,
-    'requestedDelivery': requestedDelivery,
-    if (heldQueueDisposition != null)
-      'heldQueueDisposition': heldQueueDisposition,
-    if (expectedHeldQueueItemIds != null &&
-        expectedHeldQueueItemIds.isNotEmpty)
-      'expectedHeldQueueItemIds': expectedHeldQueueItemIds,
-  });
+  }) =>
+      sendCommand(sessionId, 'sendText', {
+        'text': text,
+        'requestedDelivery': requestedDelivery,
+        if (heldQueueDisposition != null)
+          'heldQueueDisposition': heldQueueDisposition,
+        if (expectedHeldQueueItemIds != null &&
+            expectedHeldQueueItemIds.isNotEmpty)
+          'expectedHeldQueueItemIds': expectedHeldQueueItemIds,
+      });
 
   Future<dynamic> forkAssistant(
     String sessionId,
     Map<String, dynamic> target,
-  ) => sendCommand(sessionId, 'forkAssistant', {'target': target});
+  ) =>
+      sendCommand(sessionId, 'forkAssistant', {'target': target});
 
   Future<dynamic> editUserQuery(
     String sessionId,
     Map<String, dynamic> target,
     String newText,
-  ) => sendCommand(sessionId, 'editUserQuery', {
-    'target': target,
-    'newText': newText,
-  });
+  ) =>
+      sendCommand(sessionId, 'editUserQuery', {
+        'target': target,
+        'newText': newText,
+      });
 
   Future<dynamic> applyFileRewind(
     String sessionId,
     Map<String, dynamic> target,
-  ) => sendCommand(sessionId, 'applyFileRewind', {'target': target});
+  ) =>
+      sendCommand(sessionId, 'applyFileRewind', {'target': target});
 
   Future<dynamic> plans(String sessionId) async {
     await handshake();
@@ -690,15 +788,16 @@ class ConversationTransport {
     String? freeText,
     String? action,
     Map<String, dynamic>? content,
-  }) => sendCommand(sessionId, 'resolveInteraction', {
-    'interactionId': interactionId,
-    'answer': {
-      if (optionId != null) 'optionId': optionId,
-      if (freeText != null) 'freeText': freeText,
-      if (action != null) 'action': action,
-      if (content != null) 'content': content,
-    },
-  });
+  }) =>
+      sendCommand(sessionId, 'resolveInteraction', {
+        'interactionId': interactionId,
+        'answer': {
+          if (optionId != null) 'optionId': optionId,
+          if (freeText != null) 'freeText': freeText,
+          if (action != null) 'action': action,
+          if (content != null) 'content': content,
+        },
+      });
 
   /// Resume a stopped/failed workflow run (web resumeWorkflowRun; the CLI
   /// computes the `resumable` bit — the UI never derives it). No
@@ -768,19 +867,23 @@ class ConversationTransport {
     String sessionId,
     Map payload,
     List<String> reviewItemIds,
-  ) => sendCommand(sessionId, 'respondWorkspaceHookReview', {
-    'sessionId': payload['sessionId'],
-    'taskId': payload['taskId'],
-    'runId': payload['runId'],
-    if (payload['remoteSessionId'] != null)
-      'remoteSessionId': payload['remoteSessionId'],
-    'workspaceIdentity': payload['workspaceIdentity'],
-    'bundleDigest': payload['bundleDigest'],
-    'reviewFlowId': payload['reviewFlowId'],
-    'generation': payload['generation'],
-    'interactionId': payload['interactionId'],
-    'decision': {'action': 'trust_selected', 'reviewItemIds': reviewItemIds},
-  });
+  ) =>
+      sendCommand(sessionId, 'respondWorkspaceHookReview', {
+        'sessionId': payload['sessionId'],
+        'taskId': payload['taskId'],
+        'runId': payload['runId'],
+        if (payload['remoteSessionId'] != null)
+          'remoteSessionId': payload['remoteSessionId'],
+        'workspaceIdentity': payload['workspaceIdentity'],
+        'bundleDigest': payload['bundleDigest'],
+        'reviewFlowId': payload['reviewFlowId'],
+        'generation': payload['generation'],
+        'interactionId': payload['interactionId'],
+        'decision': {
+          'action': 'trust_selected',
+          'reviewItemIds': reviewItemIds
+        },
+      });
 
   Future<dynamic> rowsRange(
     String sessionId, {
@@ -836,14 +939,18 @@ class ConversationTransport {
   List<SkillEntry> lastSkills = const [];
 
   Future<List<SkillEntry>> skills() async {
-    final res = await _channels.call(Channels.skills, 'list', [
-      {
-        'workspacePath': scope['workspacePath'],
-        if (scope['workspaceIdentity'] != null)
-          'workspaceIdentity': scope['workspaceIdentity'],
-        'provider': 'glm',
-      },
-    ], timeout: const Duration(seconds: 20));
+    final res = await _channels.call(
+        Channels.skills,
+        'list',
+        [
+          {
+            'workspacePath': scope['workspacePath'],
+            if (scope['workspaceIdentity'] != null)
+              'workspaceIdentity': scope['workspaceIdentity'],
+            'provider': 'glm',
+          },
+        ],
+        timeout: const Duration(seconds: 20));
     final raw = res is List ? res : (res is Map ? res['skills'] : null);
     if (raw is! List) return const [];
     return lastSkills = [
@@ -1118,8 +1225,20 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
   DateTime _startedAt = DateTime.now();
   Timer? _watchdog;
 
+  /// Attempt id sent on the subscribe that is in flight. The desktop restarts
+  /// a failed runtime only when this matches `runtimeInitialization.attemptId`.
+  String? _retryInitialization;
+
+  /// Failed attempt ids already sent, and how many restarts this subscription
+  /// has issued. A permanently failed session must not resubscribe forever.
+  final Set<String> _retriedAttempts = {};
+  int _initRetries = 0;
+  static const _maxInitRetries = 2;
+  Timer? _initRetryTimer;
+  Future<void>? _initRetryInFlight;
+
   ConversationSubscription._(ConversationTransport transport, this.sessionId)
-    : super(transport, ConversationState(), 'v4');
+      : super(transport, ConversationState(), 'v4');
 
   @override
   String get _frameEventName => 'onDynamicConversationFrame';
@@ -1130,7 +1249,83 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
   @override
   String get _resyncMethod => 'resyncConversationV4';
   @override
-  Map<String, dynamic> get _subscribeArgs => {'sessionId': sessionId};
+  Map<String, dynamic> get _subscribeArgs => {
+        'sessionId': sessionId,
+        if (_retryInitialization != null && _retryInitialization!.isNotEmpty)
+          'retryInitialization': _retryInitialization,
+      };
+
+  /// The current failed attempt, when this subscription may still ask the
+  /// desktop to restart it. Null once the budget is spent or the runtime is
+  /// not failed.
+  String? _attemptToRetry() {
+    if (_initRetries >= _maxInitRetries) return null;
+    final init = state.runtimeInitialization;
+    if (init == null || !init.isFailed) return null;
+    final id = init.attemptId;
+    if (id == null || id.isEmpty || _retriedAttempts.contains(id)) return null;
+    return id;
+  }
+
+  @override
+  Future<void> _start() async {
+    final retry = _attemptToRetry();
+    _retryInitialization = retry;
+    try {
+      await super._start();
+      final ready = state.runtimeInitialization?.isReady == true;
+      if (retry != null && !ready) {
+        _retriedAttempts.add(retry);
+        _initRetries += 1;
+      } else if (ready) {
+        _initRetries = 0;
+        _retriedAttempts.clear();
+      }
+    } finally {
+      _retryInitialization = null;
+    }
+  }
+
+  /// Resubscribes so a failed runtime restarts. Joins an attempt already in
+  /// flight. Returns false when there is nothing left to retry.
+  Future<bool> retryFailedInitialization() {
+    final existing = _initRetryInFlight;
+    if (existing != null) {
+      return existing.then((_) => _attemptToRetry() != null);
+    }
+    if (_attemptToRetry() == null) return Future.value(false);
+    final future = _resubscribe();
+    _initRetryInFlight = future;
+    return future.then((_) => true).whenComplete(() {
+      if (identical(_initRetryInFlight, future)) _initRetryInFlight = null;
+      _scheduleInitRetry();
+    });
+  }
+
+  void _scheduleInitRetry() {
+    if (_disposed) return;
+    final init = state.runtimeInitialization;
+    if (init != null && init.isReady) {
+      _initRetries = 0;
+      _retriedAttempts.clear();
+      _initRetryTimer?.cancel();
+      _initRetryTimer = null;
+      return;
+    }
+    if (_initRetryTimer != null) return;
+    if (_attemptToRetry() == null) return;
+    _initRetryTimer = Timer(Duration.zero, () {
+      _initRetryTimer = null;
+      if (_disposed) return;
+      final inFlight = _initRetryInFlight;
+      if (inFlight != null) {
+        unawaited(inFlight.whenComplete(_scheduleInitRetry));
+        return;
+      }
+      unawaited(retryFailedInitialization());
+    });
+  }
+
   @override
   Map<String, dynamic> get _unsubscribeArgs => const {};
   @override
@@ -1162,6 +1357,7 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
 
   @override
   Future<void> _onDispose() async {
+    _initRetryTimer?.cancel();
     _watchdog?.cancel();
     _transport._untrackSubscription(sessionId);
     state.dispose();
@@ -1173,6 +1369,7 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
     if (subId == null || frame['subscriptionId'] != subId) return;
     _lastFrameAt = DateTime.now();
     state.applyFrame(frame, onGap: _resync);
+    _scheduleInitRetry();
   }
 
   /// Asks the desktop for a fresh snapshot on this same subscription.
@@ -1214,16 +1411,16 @@ class WorkspacePrep {
   final Map raw;
 
   WorkspacePrep._(this.raw)
-    : configOptions = [
-        if (raw['configOptions'] is List)
-          for (final o in raw['configOptions'] as List)
-            if (o is Map) ConfigOption._(o),
-      ],
-      slashCommands = [
-        if (raw['slashCommands'] is List)
-          for (final c in raw['slashCommands'] as List)
-            if (c is Map) SlashCommand._(c),
-      ];
+      : configOptions = [
+          if (raw['configOptions'] is List)
+            for (final o in raw['configOptions'] as List)
+              if (o is Map) ConfigOption._(o),
+        ],
+        slashCommands = [
+          if (raw['slashCommands'] is List)
+            for (final c in raw['slashCommands'] as List)
+              if (c is Map) SlashCommand._(c),
+        ];
 
   /// Public constructor (tests / manual construction).
   factory WorkspacePrep.fromMap(Map raw) => WorkspacePrep._(raw);
@@ -1247,13 +1444,13 @@ class SkillEntry {
   final bool enabled;
 
   SkillEntry._(Map raw)
-    : id = '${raw['id'] ?? ''}',
-      name = '${raw['name'] ?? ''}',
-      path = '${raw['path'] ?? ''}',
-      scope = '${raw['scope'] ?? 'workspace'}',
-      description = raw['description'] as String?,
-      argumentHint = raw['argumentHint'] as String?,
-      enabled = raw['enabled'] != false;
+      : id = '${raw['id'] ?? ''}',
+        name = '${raw['name'] ?? ''}',
+        path = '${raw['path'] ?? ''}',
+        scope = '${raw['scope'] ?? 'workspace'}',
+        description = raw['description'] as String?,
+        argumentHint = raw['argumentHint'] as String?,
+        enabled = raw['enabled'] != false;
 }
 
 class ConfigOption {
@@ -1265,16 +1462,16 @@ class ConfigOption {
   final List<ConfigOptionValue> options;
 
   ConfigOption._(Map raw)
-    : id = '${raw['id'] ?? ''}',
-      name = '${raw['name'] ?? ''}',
-      category = '${raw['category'] ?? ''}',
-      type = '${raw['type'] ?? ''}',
-      currentValue = raw['currentValue'],
-      options = [
-        if (raw['options'] is List)
-          for (final v in raw['options'] as List)
-            if (v is Map) ConfigOptionValue._(v),
-      ];
+      : id = '${raw['id'] ?? ''}',
+        name = '${raw['name'] ?? ''}',
+        category = '${raw['category'] ?? ''}',
+        type = '${raw['type'] ?? ''}',
+        currentValue = raw['currentValue'],
+        options = [
+          if (raw['options'] is List)
+            for (final v in raw['options'] as List)
+              if (v is Map) ConfigOptionValue._(v),
+        ];
 }
 
 class ConfigOptionValue {
@@ -1284,10 +1481,10 @@ class ConfigOptionValue {
   final String? modelProviderName;
 
   ConfigOptionValue._(Map raw)
-    : value = '${raw['value'] ?? ''}',
-      name = '${raw['name'] ?? raw['value'] ?? ''}',
-      description = raw['description'] as String?,
-      modelProviderName = raw['modelProviderName'] as String?;
+      : value = '${raw['value'] ?? ''}',
+        name = '${raw['name'] ?? raw['value'] ?? ''}',
+        description = raw['description'] as String?,
+        modelProviderName = raw['modelProviderName'] as String?;
 }
 
 class SlashCommand {
@@ -1297,10 +1494,10 @@ class SlashCommand {
   final String source;
 
   SlashCommand._(Map raw)
-    : name = '${raw['name'] ?? ''}',
-      description = '${raw['description'] ?? ''}',
-      inputHint = raw['inputHint'] as String?,
-      source = '${raw['source'] ?? ''}';
+      : name = '${raw['name'] ?? ''}',
+        description = '${raw['description'] ?? ''}',
+        inputHint = raw['inputHint'] as String?,
+        source = '${raw['source'] ?? ''}';
 }
 
 class _LogicalFrameAssembly {
@@ -1343,16 +1540,16 @@ class SessionEntry {
   final Map<String, dynamic> raw;
 
   SessionEntry(this.raw)
-    : sessionId = '${raw['sessionId'] ?? ''}',
-      parentSessionId = raw['parentSessionId'] as String?,
-      title = '${raw['title'] ?? ''}',
-      phase = '${raw['phase'] ?? ''}',
-      lastAssistantPreview = raw['lastAssistantPreview'] as String?,
-      lastActivityAt = (raw['lastActivityAt'] as num?)?.toInt() ?? 0,
-      createdAt = (raw['createdAt'] as num?)?.toInt() ?? 0,
-      hasBackgroundWork = raw['hasBackgroundWork'] == true,
-      pendingInteraction = (raw['pendingInteraction'] as Map?)
-          ?.cast<String, dynamic>();
+      : sessionId = '${raw['sessionId'] ?? ''}',
+        parentSessionId = raw['parentSessionId'] as String?,
+        title = '${raw['title'] ?? ''}',
+        phase = '${raw['phase'] ?? ''}',
+        lastAssistantPreview = raw['lastAssistantPreview'] as String?,
+        lastActivityAt = (raw['lastActivityAt'] as num?)?.toInt() ?? 0,
+        createdAt = (raw['createdAt'] as num?)?.toInt() ?? 0,
+        hasBackgroundWork = raw['hasBackgroundWork'] == true,
+        pendingInteraction =
+            (raw['pendingInteraction'] as Map?)?.cast<String, dynamic>();
 
   /// Adapts a relay task (`Dg` model from bootstrap / workspace-list-updated)
   /// into a row entry so the task list can render non-active workspaces and
@@ -1447,7 +1644,7 @@ class SessionsIndexState extends ChangeNotifier {
 
 class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
   SessionsIndexSubscription._(ConversationTransport transport)
-    : super(transport, SessionsIndexState(), 'v4-si');
+      : super(transport, SessionsIndexState(), 'v4-si');
 
   @override
   String get _frameEventName => 'onDynamicSessionsIndexFrame';
@@ -1459,16 +1656,16 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
   String get _resyncMethod => 'resyncSessionsIndexV4';
   @override
   Map<String, dynamic> get _subscribeArgs => const {
-    'runtimePolicy': 'existing-only',
-  };
+        'runtimePolicy': 'existing-only',
+      };
   @override
   Map<String, dynamic> get _unsubscribeArgs => const {
-    'runtimePolicy': 'existing-only',
-  };
+        'runtimePolicy': 'existing-only',
+      };
   @override
   Map<String, dynamic> get _resyncArgs => const {
-    'runtimePolicy': 'existing-only',
-  };
+        'runtimePolicy': 'existing-only',
+      };
   @override
   String get topic =>
       'sessions-index/${_transport.scope['workspaceIdentity'] ?? _transport.scope['workspacePath']}';
@@ -1488,6 +1685,70 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
     if (subId == null || frame['subscriptionId'] != subId) return;
     state.applyFrame(frame, onGap: _resync);
   }
+}
+
+/// Desktop `snapshot.runtimeInitialization`. Commands are rejected until
+/// [status] is `ready`. A `failed` snapshot restarts only when the next
+/// subscribe passes [attemptId] as `retryInitialization`.
+class RuntimeInitialization {
+  static const guardFailed = 'guard.runtimeInitializationFailed';
+  static const guardInitializing = 'guard.runtimeInitializing';
+
+  final String status;
+  final String? attemptId;
+  final String? reasonCode;
+  final String? message;
+
+  const RuntimeInitialization({
+    required this.status,
+    this.attemptId,
+    this.reasonCode,
+    this.message,
+  });
+
+  bool get isReady => status == 'ready';
+  bool get isFailed => status == 'failed';
+
+  static RuntimeInitialization? fromSnapshot(Map<String, dynamic>? snapshot) {
+    final raw = snapshot?['runtimeInitialization'];
+    if (raw is! Map) return null;
+    final status = raw['status'];
+    if (status is! String || status.isEmpty) return null;
+    final attempt = raw['attemptId'];
+    final reason = raw['reasonCode'];
+    final message = raw['message'];
+    return RuntimeInitialization(
+      status: status,
+      attemptId: attempt is String && attempt.isNotEmpty ? attempt : null,
+      reasonCode: reason is String && reason.isNotEmpty ? reason : null,
+      message: message is String && message.isNotEmpty ? message : null,
+    );
+  }
+}
+
+/// Text for a command ack. Runtime-guard rejections share one cause, so the
+/// phone shows that cause instead of the raw reason code. [runtimeFailed]
+/// and [runtimeStarting] are the already-translated labels.
+String commandAckDetail(
+  dynamic res, {
+  required String runtimeFailed,
+  required String runtimeStarting,
+  String? runtimeMessage,
+}) {
+  if (res is! Map) return '$res';
+  final code = res['reasonCode'];
+  if (code == RuntimeInitialization.guardFailed ||
+      code == RuntimeInitialization.guardInitializing) {
+    final base = code == RuntimeInitialization.guardFailed
+        ? runtimeFailed
+        : runtimeStarting;
+    final detail = (runtimeMessage != null && runtimeMessage.isNotEmpty)
+        ? runtimeMessage
+        : res['message'];
+    if (detail is String && detail.isNotEmpty) return '$base: $detail';
+    return base;
+  }
+  return '${res['reasonCode'] ?? res['message'] ?? res['status']}';
 }
 
 /// Conversation snapshot + row state, mirrors `fke()`/`pke()` delta
@@ -1563,9 +1824,9 @@ class ConversationState extends ChangeNotifier {
       final window = rowsObj['window'];
       rows = window is List
           ? window
-                .whereType<Map>()
-                .map((e) => e.cast<String, dynamic>())
-                .toList()
+              .whereType<Map>()
+              .map((e) => e.cast<String, dynamic>())
+              .toList()
           : [];
       totalCount = (rowsObj['totalCount'] as num?)?.toInt() ?? rows.length;
       // Official semantics (rowsWindowSchema): firstRowId is the FIRST row
@@ -1573,9 +1834,8 @@ class ConversationState extends ChangeNotifier {
       // cursor is the window's first row (web conversationProjectionStore
       // loadOlder uses snapshot.rows.window[0].rowId).
       storeFirstRowId = (rowsObj['firstRowId'] as num?)?.toInt();
-      firstRowId = rows.isNotEmpty
-          ? (rows.first['rowId'] as num?)?.toInt()
-          : null;
+      firstRowId =
+          rows.isNotEmpty ? (rows.first['rowId'] as num?)?.toInt() : null;
       if (older.isNotEmpty) {
         final seen = rows.map((r) => (r['rowId'] as num?)?.toInt()).toSet();
         final fresh = <Map<String, dynamic>>[];
@@ -1702,9 +1962,8 @@ class ConversationState extends ChangeNotifier {
             .toList();
         final removed = rows.length - kept.length;
         rows = kept;
-        firstRowId = rows.isNotEmpty
-            ? (rows.first['rowId'] as num?)?.toInt()
-            : null;
+        firstRowId =
+            rows.isNotEmpty ? (rows.first['rowId'] as num?)?.toInt() : null;
         totalCount = (totalCount - removed).clamp(0, 1 << 31);
         break;
       case 'row.delta':
@@ -1813,6 +2072,69 @@ class ConversationState extends ChangeNotifier {
 
   /// Current conversation revision (CAS commands base this on).
   int get revision => (snapshot?['revision'] as num?)?.toInt() ?? 0;
+
+  /// Null when this desktop build does not report runtime startup. Commands
+  /// are not guarded in that case, so a missing field counts as ready.
+  RuntimeInitialization? get runtimeInitialization =>
+      RuntimeInitialization.fromSnapshot(snapshot);
+
+  bool get runtimeReady {
+    final init = runtimeInitialization;
+    return init == null || init.isReady;
+  }
+
+  /// Resolves on the next snapshot that carries [runtimeInitialization], or
+  /// when [timeout] elapses.
+  Future<void> waitForRuntimeInitialization(Duration timeout) {
+    if (runtimeInitialization != null) return Future.value();
+    final completer = Completer<void>();
+    late void Function() listener;
+    final timer = Timer(timeout, () {
+      if (!completer.isCompleted) completer.complete();
+    });
+    listener = () {
+      if (runtimeInitialization != null && !completer.isCompleted) {
+        completer.complete();
+      }
+    };
+    addListener(listener);
+    return completer.future.whenComplete(() {
+      timer.cancel();
+      removeListener(listener);
+    });
+  }
+
+  /// Resolves `true` once the runtime can take commands. A failed snapshot
+  /// is not waited out: callers restart it with [attemptId] first.
+  Future<bool> waitUntilRuntimeReady(Duration timeout) {
+    if (runtimeReady) return Future.value(true);
+    final started = runtimeInitialization;
+    final completer = Completer<bool>();
+    late void Function() listener;
+    final timer = Timer(timeout, () {
+      if (!completer.isCompleted) completer.complete(runtimeReady);
+    });
+    listener = () {
+      if (completer.isCompleted) return;
+      if (runtimeReady) {
+        completer.complete(true);
+        return;
+      }
+      final now = runtimeInitialization;
+      // Same failed attempt: a restart is in flight and the next snapshot
+      // has not landed. Any other failure is terminal for this wait.
+      if (now != null &&
+          now.isFailed &&
+          (started?.isFailed != true || now.attemptId != started?.attemptId)) {
+        completer.complete(false);
+      }
+    };
+    addListener(listener);
+    return completer.future.whenComplete(() {
+      timer.cancel();
+      removeListener(listener);
+    });
+  }
 
   String get phase => control?['phase'] as String? ?? '';
 

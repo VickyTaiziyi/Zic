@@ -276,7 +276,8 @@ abstract interface class ChatGateway implements Listenable {
 
   /// Workflow run artifact summaries (web workflowRunArtifacts); empty
   /// when the desktop rejects the call.
-  Future<List<Map<String, dynamic>>> runArtifacts(String sessionId, String runId);
+  Future<List<Map<String, dynamic>>> runArtifacts(
+      String sessionId, String runId);
 
   /// Preset-board items (web workflowRunArtifactData).
   Future<List<Map<String, dynamic>>> runArtifactData(
@@ -469,6 +470,22 @@ class DeviceSession extends ChangeNotifier
   /// Bumped only when the link itself is replaced. An open chat follows
   /// this, not every catalog refresh.
   int _linkEpoch = 0;
+
+  /// Sessions-index subscribe generation. A newer workspace open invalidates
+  /// an index call that is still in flight on the previous bridge.
+  int _indexAttachGen = 0;
+
+  /// True while the background sessions-index subscribe has not settled.
+  /// The list watchdog must not reopen the bridge during that wait: the
+  /// conversation subscribe is what starts the runtime, and a reopen would
+  /// cancel it.
+  bool _indexAttachInFlight = false;
+
+  static const _indexRetryDelays = <Duration>[
+    Duration(milliseconds: 800),
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+  ];
 
   /// Set when the desktop refuses a folder that is not in the current
   /// window. Rebuilding the relay does not open that folder.
@@ -727,8 +744,7 @@ class DeviceSession extends ChangeNotifier
   void _maybeScheduleRetry() {
     if (_disposed || _kicked) return;
     final msg = _error ?? '';
-    final retryable =
-        msg.contains('relay-unavailable') ||
+    final retryable = msg.contains('relay-unavailable') ||
         msg.contains('desktop-disconnected') ||
         msg.contains('TimeoutException');
     if (!retryable || _retryAttempts >= 3) return;
@@ -959,18 +975,21 @@ class DeviceSession extends ChangeNotifier
       };
       final conversation = bridge.conversation(scope, onLog: _log);
       _conversation = conversation;
-      final sub = await conversation.subscribeSessionsIndex();
-      if (_disposed || _bridge != bridge) {
-        await sub.dispose();
-        return;
-      }
-      _sessionsSub = sub;
-      sub.state.addListener(_onSessionsChanged);
+      // Release the open chain before the sessions index. Chat subscribe
+      // waits on this chain, and subscribeConversationV4 is what starts the
+      // runtime. The index is existing-only and can sit for the whole
+      // subscribe timeout when that runtime is not up yet.
       _openMiss = null;
       _error = null;
       _linkEpoch += 1;
       onWorkspaceOpened?.call(key);
       notifyListeners();
+      final attachGen = ++_indexAttachGen;
+      unawaited(_attachSessionsIndex(attachGen, conversation, bridge));
+      _log(
+        '[session] workspace bridge ready in ${sw.elapsedMilliseconds}ms; '
+        'sessions-index in background',
+      );
     } catch (e) {
       _log('[session] workspace open failed: $e');
       // A folder that is not open in the current desktop window is not a
@@ -1017,6 +1036,62 @@ class DeviceSession extends ChangeNotifier
       if (_chatSubs.isNotEmpty) return;
       unawaited(_refreshCatalog());
     });
+  }
+
+  bool _indexAttachCurrent(
+    int gen,
+    BridgeSession bridge,
+    ConversationTransport conversation,
+  ) =>
+      !_disposed &&
+      gen == _indexAttachGen &&
+      identical(_bridge, bridge) &&
+      identical(_conversation, conversation);
+
+  /// Subscribes the sessions index without holding the workspace-open chain.
+  /// A cold folder has no CLI yet; existing-only then fails fast, and the
+  /// conversation subscribe started by the open chat is what spawns it.
+  /// Retry the index a few times so the list attaches once that process exists.
+  Future<void> _attachSessionsIndex(
+    int gen,
+    ConversationTransport conversation,
+    BridgeSession bridge,
+  ) async {
+    if (!_indexAttachCurrent(gen, bridge, conversation)) return;
+    _indexAttachInFlight = true;
+    try {
+      for (var attempt = 0;; attempt++) {
+        if (!_indexAttachCurrent(gen, bridge, conversation)) return;
+        try {
+          final sub = await conversation.subscribeSessionsIndex();
+          if (!_indexAttachCurrent(gen, bridge, conversation)) {
+            await sub.dispose();
+            return;
+          }
+          final previous = _sessionsSub;
+          _sessionsSub = sub;
+          sub.state.addListener(_onSessionsChanged);
+          if (previous != null && !identical(previous, sub)) {
+            previous.state.removeListener(_onSessionsChanged);
+            unawaited(previous.dispose());
+          }
+          notifyListeners();
+          return;
+        } catch (e) {
+          _log('[session] sessions-index subscribe failed: $e');
+          if (!_indexAttachCurrent(gen, bridge, conversation)) return;
+          if (e is TimeoutException || attempt >= _indexRetryDelays.length) {
+            return;
+          }
+          await Future.delayed(_indexRetryDelays[attempt]);
+        }
+      }
+    } finally {
+      if (gen == _indexAttachGen) {
+        _indexAttachInFlight = false;
+        if (_openMiss == null) _armListWatchdog();
+      }
+    }
   }
 
   bool _catalogCurrent(int gen, BridgeSession bridge) =>
@@ -1108,19 +1183,19 @@ class DeviceSession extends ChangeNotifier
   }
 
   String _catalogSignature() => jsonEncode([
-    for (final p in _projects) [p.id, p.name, p.position, p.roots],
-    for (final t in _relayTasks)
-      [
-        t['taskId'],
-        t['title'],
-        t['updatedAt'],
-        t['archived'],
-        t['pinned'],
-        t['displayStatus'],
-        t['projectId'],
-        t['workspacePath'],
-      ],
-  ]);
+        for (final p in _projects) [p.id, p.name, p.position, p.roots],
+        for (final t in _relayTasks)
+          [
+            t['taskId'],
+            t['title'],
+            t['updatedAt'],
+            t['archived'],
+            t['pinned'],
+            t['displayStatus'],
+            t['projectId'],
+            t['workspacePath'],
+          ],
+      ]);
 
   void _noteCatalogError(Object e) {
     final msg = '$e';
@@ -1160,6 +1235,9 @@ class DeviceSession extends ChangeNotifier
   /// suspend/connect teardowns via the shared cancel points.
   void _armListWatchdog() {
     _listWatchdog?.cancel();
+    // The index subscribe is still the plan for this bridge. Reopening now
+    // would dispose the conversation subscribe that is starting the runtime.
+    if (_indexAttachInFlight) return;
     if (_openMiss != null) return;
     if (_disposed || status != DeviceStatus.connected) return;
     final sub = _sessionsSub;
@@ -1568,12 +1646,13 @@ class DeviceSession extends ChangeNotifier
     String? firstText,
     List<Map<String, dynamic>>? attachments,
     Map<String, dynamic>? config,
-  }) => _requireConversation.createSession(
-    workspaceId,
-    firstText: firstText,
-    attachments: attachments,
-    config: config,
-  );
+  }) =>
+      _requireConversation.createSession(
+        workspaceId,
+        firstText: firstText,
+        attachments: attachments,
+        config: config,
+      );
 
   @override
   Future<dynamic> sendText(
@@ -1581,23 +1660,25 @@ class DeviceSession extends ChangeNotifier
     String text, {
     List<Map<String, dynamic>>? attachments,
     String? heldQueueDisposition,
-  }) => _requireConversation.sendText(
-    sessionId,
-    text,
-    attachments: attachments,
-    heldQueueDisposition: heldQueueDisposition,
-  );
+  }) =>
+      _requireConversation.sendText(
+        sessionId,
+        text,
+        attachments: attachments,
+        heldQueueDisposition: heldQueueDisposition,
+      );
 
   @override
   Future<dynamic> sendGoalCommand(
     String sessionId,
     String text, {
     String? heldQueueDisposition,
-  }) => _requireConversation.sendGoalCommand(
-    sessionId,
-    text,
-    heldQueueDisposition: heldQueueDisposition,
-  );
+  }) =>
+      _requireConversation.sendGoalCommand(
+        sessionId,
+        text,
+        heldQueueDisposition: heldQueueDisposition,
+      );
 
   @override
   Future<dynamic> stop(String sessionId) =>
@@ -1621,12 +1702,13 @@ class DeviceSession extends ChangeNotifier
     required String provider,
     required String model,
     required String thought,
-  }) => _requireConversation.switchModelConfig(
-    sessionId,
-    provider: provider,
-    model: model,
-    thought: thought,
-  );
+  }) =>
+      _requireConversation.switchModelConfig(
+        sessionId,
+        provider: provider,
+        model: model,
+        thought: thought,
+      );
 
   @override
   Future<dynamic> switchCollaborationMode(String sessionId, String mode) =>
@@ -1641,7 +1723,8 @@ class DeviceSession extends ChangeNotifier
     String sessionId,
     Map<String, dynamic> target,
     String? feedback,
-  ) => _requireConversation.setAssistantFeedback(sessionId, target, feedback);
+  ) =>
+      _requireConversation.setAssistantFeedback(sessionId, target, feedback);
 
   @override
   Future<dynamic> resolveInteraction(
@@ -1651,31 +1734,32 @@ class DeviceSession extends ChangeNotifier
     String? freeText,
     String? action,
     Map<String, dynamic>? content,
-  }) => _requireConversation.resolveInteraction(
-    sessionId,
-    interactionId,
-    optionId: optionId,
-    freeText: freeText,
-    action: action,
-    content: content,
-  );
+  }) =>
+      _requireConversation.resolveInteraction(
+        sessionId,
+        interactionId,
+        optionId: optionId,
+        freeText: freeText,
+        action: action,
+        content: content,
+      );
 
   @override
   Future<dynamic> respondWorkspaceHookReview(
     String sessionId,
     Map payload,
     List<String> reviewItemIds,
-  ) => _requireConversation.respondWorkspaceHookReview(
-    sessionId,
-    payload,
-    reviewItemIds,
-  );
+  ) =>
+      _requireConversation.respondWorkspaceHookReview(
+        sessionId,
+        payload,
+        reviewItemIds,
+      );
 
   @override
   Future<dynamic> resumeWorkflowRun(String sessionId, String runId,
           {String? name}) =>
-      _requireConversation
-          .resumeWorkflowRun(sessionId, runId, name: name);
+      _requireConversation.resumeWorkflowRun(sessionId, runId, name: name);
 
   @override
   Future<List<Map<String, dynamic>>> runArtifacts(
@@ -1780,11 +1864,12 @@ class DeviceSession extends ChangeNotifier
     String sessionId, {
     int? beforeRowId,
     int limit = 60,
-  }) => _requireConversation.rowsRange(
-    sessionId,
-    beforeRowId: beforeRowId,
-    limit: limit,
-  );
+  }) =>
+      _requireConversation.rowsRange(
+        sessionId,
+        beforeRowId: beforeRowId,
+        limit: limit,
+      );
 
   @override
   Future<Map<String, dynamic>> attachmentPut(
@@ -1793,19 +1878,21 @@ class DeviceSession extends ChangeNotifier
     required String mime,
     required Uint8List bytes,
     void Function(double progress)? onProgress,
-  }) => _requireConversation.attachmentPut(
-    sessionId,
-    fileName: fileName,
-    mime: mime,
-    bytes: bytes,
-    onProgress: onProgress,
-  );
+  }) =>
+      _requireConversation.attachmentPut(
+        sessionId,
+        fileName: fileName,
+        mime: mime,
+        bytes: bytes,
+        onProgress: onProgress,
+      );
 
   @override
   Future<({Uint8List bytes, String? mediaType})> attachmentRead(
     String sessionId, {
     required String ref,
-  }) => _requireConversation.attachmentRead(sessionId, ref: ref);
+  }) =>
+      _requireConversation.attachmentRead(sessionId, ref: ref);
 
   @override
   Future<dynamic> sendQueuedNow(String sessionId, String queueItemId) =>
@@ -1816,7 +1903,8 @@ class DeviceSession extends ChangeNotifier
     String sessionId,
     String queueItemId,
     String newText,
-  ) => _requireConversation.editQueueItem(sessionId, queueItemId, newText);
+  ) =>
+      _requireConversation.editQueueItem(sessionId, queueItemId, newText);
 
   @override
   Future<dynamic> deleteQueueItem(String sessionId, String queueItemId) =>
@@ -1853,7 +1941,8 @@ class DeviceSession extends ChangeNotifier
   Future<dynamic> fileChanges(
     String sessionId, {
     required Map<String, dynamic> target,
-  }) => _requireConversation.fileChanges(sessionId, target: target);
+  }) =>
+      _requireConversation.fileChanges(sessionId, target: target);
 
   @override
   Future<dynamic> retryTurn(String sessionId, Map<String, dynamic> target) =>
@@ -1863,26 +1952,30 @@ class DeviceSession extends ChangeNotifier
   Future<dynamic> forkAssistant(
     String sessionId,
     Map<String, dynamic> target,
-  ) => _requireConversation.forkAssistant(sessionId, target);
+  ) =>
+      _requireConversation.forkAssistant(sessionId, target);
 
   @override
   Future<dynamic> editUserQuery(
     String sessionId,
     Map<String, dynamic> target,
     String newText,
-  ) => _requireConversation.editUserQuery(sessionId, target, newText);
+  ) =>
+      _requireConversation.editUserQuery(sessionId, target, newText);
 
   @override
   Future<dynamic> applyFileRewind(
     String sessionId,
     Map<String, dynamic> target,
-  ) => _requireConversation.applyFileRewind(sessionId, target);
+  ) =>
+      _requireConversation.applyFileRewind(sessionId, target);
 
   @override
   Future<dynamic> fileRewindPreview(
     String sessionId, {
     required Map<String, dynamic> target,
-  }) => _requireConversation.fileRewindPreview(sessionId, target: target);
+  }) =>
+      _requireConversation.fileRewindPreview(sessionId, target: target);
 
   @override
   Future<List<Map<String, dynamic>>> mentionFiles() async {
@@ -2011,6 +2104,8 @@ class DeviceSession extends ChangeNotifier
     _cancelProjectWatch?.call();
     _cancelProjectWatch = null;
     _catalogGen += 1;
+    _indexAttachGen += 1;
+    _indexAttachInFlight = false;
     _projects = [];
     _catalogError = null;
     _listEscalations = 0;
@@ -2133,9 +2228,8 @@ class DeviceSessionHub extends ChangeNotifier {
       handshakeHeaderProvider: relayHeaderProvider == null
           ? null
           : () => relayHeaderProvider!(params),
-      relayTokenProvider: relayTokenProvider == null
-          ? null
-          : () => relayTokenProvider!(params),
+      relayTokenProvider:
+          relayTokenProvider == null ? null : () => relayTokenProvider!(params),
       connectGate: connectGate,
     );
   }
